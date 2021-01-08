@@ -6,13 +6,13 @@ Usage:
 
   python setup.py install <additional_flags>..<additional_flags> <additional_arg>=<value>..<additional_arg>=<value>
 
-  export CXX=<C++ compiler>; python setup.py install <additional_flags>..<additional_flags> <additional_arg>=<value>..<additional_arg>=<value>
+  export CC=<C++ compiler>; python setup.py install <additional_flags>..<additional_flags> <additional_arg>=<value>..<additional_arg>=<value>
 
 
 Examples:
 
   python setup.py install --force_cuda --cuda_home=/usr/local/cuda
-  export CXX=g++7; python setup.py install --force_cuda --cuda_home=/usr/local/cuda
+  export CC=g++7; python setup.py install --force_cuda --cuda_home=/usr/local/cuda
 
 
 Additional flags:
@@ -53,6 +53,7 @@ try:
 except ImportError:
     raise ImportError("Pytorch not found. Please install pytorch first.")
 
+import warnings
 import codecs
 import os
 import re
@@ -60,15 +61,14 @@ import subprocess
 from sys import argv, platform
 from setuptools import setup
 from torch.utils.cpp_extension import CppExtension, CUDAExtension, BuildExtension
-
-from distutils.sysconfig import get_python_inc
+from pathlib import Path
 
 if platform == "win32":
     raise ImportError("Windows is currently not supported.")
 elif platform == "darwin":
     # Set the distutils to use clang instead of g++ for valid std
-    os.environ["CC"] = "/usr/local/opt/llvm/bin/clang"
-    os.environ["CXX"] = "/usr/local/opt/llvm/bin/clang"
+    if "CC" not in os.environ:
+        os.environ["CC"] = "/usr/local/opt/llvm/bin/clang"
 
 here = os.path.abspath(os.path.dirname(__file__))
 
@@ -106,54 +106,76 @@ def _argparse(pattern, argv, is_flag=True):
             return arr[0].split("=")[1], argv
 
 
+run_command("rm", "-rf", "build")
+run_command("pip", "uninstall", "MinkowskiEngine", "-y")
+
 # For cpu only build
 CPU_ONLY, argv = _argparse("--cpu_only", argv)
-CPU_ONLY = CPU_ONLY or not torch.cuda.is_available()
-KEEP_OBJS, argv = _argparse("--keep_objs", argv)
 FORCE_CUDA, argv = _argparse("--force_cuda", argv)
+if not torch.cuda.is_available() and not FORCE_CUDA:
+    warnings.warn(
+        "torch.cuda.is_available() is False. MinkowskiEngine will compile with CPU_ONLY. Please use `--force_cuda` to compile with CUDA."
+    )
+
+CPU_ONLY = CPU_ONLY or not torch.cuda.is_available()
+if FORCE_CUDA:
+    CPU_ONLY = False
 
 # args with return value
 CUDA_HOME, argv = _argparse("--cuda_home", argv, False)
 BLAS, argv = _argparse("--blas", argv, False)
 BLAS_INCLUDE_DIRS, argv = _argparse("--blas_include_dirs", argv, False)
 BLAS_LIBRARY_DIRS, argv = _argparse("--blas_library_dirs", argv, False)
+MAX_COMPILATION_THREADS = 12
 
 Extension = CUDAExtension
-compile_args = [
-    "make",
-    "-j%d" % min(os.cpu_count(), 12),  # parallel compilation
-    "PYTHON=" + sys.executable,  # curr python
-]
-
-extra_compile_args = ["-Wno-deprecated-declarations"]
 extra_link_args = []
-libraries = ["minkowski"]
+include_dirs = []
+libraries = []
+CC_FLAGS = []
+NVCC_FLAGS = []
 
-# extra_compile_args+=['-g']  # Uncomment for debugging
-if CPU_ONLY and not FORCE_CUDA:
+if CPU_ONLY:
     print("--------------------------------")
     print("| WARNING: CPU_ONLY build set  |")
     print("--------------------------------")
-    compile_args += ["CPU_ONLY=1"]
-    extra_compile_args += ["-DCPU_ONLY"]
     Extension = CppExtension
 else:
+    print("--------------------------------")
+    print("| CUDA compilation set         |")
+    print("--------------------------------")
     # system python installation
     libraries.append("cusparse")
 
 if not (CUDA_HOME is False):  # False when not set, str otherwise
     print(f"Using CUDA_HOME={CUDA_HOME}")
-    compile_args += [f"CUDA_HOME={CUDA_HOME}"]
 
-if KEEP_OBJS:
-    print("\nUsing built objects")
+if sys.platform == "win32":
+    vc_version = os.getenv("VCToolsVersion", "")
+    if vc_version.startswith("14.16."):
+        CC_FLAGS += ["/sdl"]
+    else:
+        CC_FLAGS += ["/sdl", "/permissive-"]
+else:
+    CC_FLAGS += ["-fopenmp"]
+
+if "darwin" in platform:
+    CC_FLAGS += ["-stdlib=libc++"]
+
+NVCC_FLAGS += ["--expt-relaxed-constexpr", "--expt-extended-lambda"]
+FAST_MATH, argv = _argparse("--fast_math", argv)
+if FAST_MATH:
+    NVCC_FLAGS.append("--use_fast_math")
 
 BLAS_LIST = ["openblas", "mkl", "atlas", "blas"]
 if not (BLAS is False):  # False only when not set, str otherwise
     assert BLAS in BLAS_LIST
-    libraries.append(BLAS)
+    if BLAS == "mkl":
+        libraries.append("mkl_rt")
+    else:
+        libraries.append(BLAS)
     if not (BLAS_INCLUDE_DIRS is False):
-        compile_args += [f"BLAS_INCLUDE_DIRS={BLAS_INCLUDE_DIRS}"]
+        include_dirs += BLAS_INCLUDE_DIRS
     if not (BLAS_LIBRARY_DIRS is False):
         extra_link_args += [f"-Wl,-rpath,{BLAS_LIBRARY_DIRS}"]
 else:
@@ -177,15 +199,103 @@ else:
 
 print(f"\nUsing BLAS={BLAS}")
 
-compile_args += ["BLAS=" + BLAS]
+# The Ninja cannot compile the files that have the same name with different
+# extensions correctly and uses the nvcc/CC based on the extension. Import a
+# .cpp file to the corresponding .cu file to force the nvcc compilation.
+SOURCE_SETS = {
+    "cpu": [
+        CppExtension,
+        [
+            "math_functions_cpu.cpp",
+            "coordinate_map_manager.cpp",
+            "convolution_cpu.cpp",
+            "convolution_transpose_cpu.cpp",
+            "local_pooling_cpu.cpp",
+            "local_pooling_transpose_cpu.cpp",
+            "global_pooling_cpu.cpp",
+            "broadcast_cpu.cpp",
+            "pruning_cpu.cpp",
+            "interpolation_cpu.cpp",
+            "quantization.cpp",
+        ],
+        ["pybind/minkowski.cpp"],
+        ["-DCPU_ONLY"],
+    ],
+    "gpu": [
+        CUDAExtension,
+        [
+            "math_functions_cpu.cpp",
+            "math_functions_gpu.cu",
+            "coordinate_map_manager.cu",
+            "coordinate_map_gpu.cu",
+            "convolution_kernel.cu",
+            "convolution_gpu.cu",
+            "convolution_transpose_gpu.cu",
+            "pooling_avg_kernel.cu",
+            "pooling_max_kernel.cu",
+            "local_pooling_gpu.cu",
+            "local_pooling_transpose_gpu.cu",
+            "global_pooling_gpu.cu",
+            "broadcast_kernel.cu",
+            "broadcast_gpu.cu",
+            "pruning_gpu.cu",
+            "interpolation_gpu.cu",
+            "spmm.cu",
+            "gpu.cu",
+            "quantization.cpp",
+        ],
+        ["pybind/minkowski.cu"],
+        [],
+    ],
+}
 
-if "darwin" in platform:
-    extra_compile_args += ["-stdlib=libc++"]
+debug, argv = _argparse("--debug", argv)
 
-if not KEEP_OBJS:
-    run_command("make", "clean")
+USE_NINJA = os.getenv("USE_NINJA") == "0"
+HERE = Path(os.path.dirname(__file__)).absolute()
+SRC_PATH = HERE / "src"
 
-run_command(*compile_args)
+if "CC" in os.environ or "CXX" in os.environ:
+    # distutils only checks CC not CXX
+    if "CXX" in os.environ:
+        os.environ["CC"] = os.environ["CXX"]
+        CC = os.environ["CXX"]
+    else:
+        CC = os.environ["CC"]
+    print(f"Using {CC} for c++ compilation")
+    if torch.__version__ < "1.7.0":
+        NVCC_FLAGS += [f"-ccbin={CC}"]
+else:
+    print("Using the default compiler")
+
+if debug:
+    CC_FLAGS += ["-g", "-DDEBUG"]
+    NVCC_FLAGS += ["-g", "-DDEBUG"]
+else:
+    CC_FLAGS += ["-O3"]
+    NVCC_FLAGS += ["-O3"]
+
+if "MAX_JOBS" not in os.environ and os.cpu_count() > MAX_COMPILATION_THREADS:
+    # Clip the num compilation thread to 8
+    os.environ["MAX_JOBS"] = str(MAX_COMPILATION_THREADS)
+
+target = "cpu" if CPU_ONLY else "gpu"
+
+Extension = SOURCE_SETS[target][0]
+SRC_FILES = SOURCE_SETS[target][1]
+BIND_FILES = SOURCE_SETS[target][2]
+ARGS = SOURCE_SETS[target][3]
+CC_FLAGS += ARGS
+NVCC_FLAGS += ARGS
+
+ext_modules = [
+    Extension(
+        name="MinkowskiEngineBackend._C",
+        sources=[*[str(SRC_PATH / src_file) for src_file in SRC_FILES], *BIND_FILES],
+        extra_compile_args={"cxx": CC_FLAGS, "nvcc": NVCC_FLAGS},
+        libraries=libraries,
+    ),
+]
 
 # Python interface
 setup(
@@ -194,17 +304,8 @@ setup(
     install_requires=["torch", "numpy"],
     packages=["MinkowskiEngine", "MinkowskiEngine.utils", "MinkowskiEngine.modules"],
     package_dir={"MinkowskiEngine": "./MinkowskiEngine"},
-    ext_modules=[
-        Extension(
-            name="MinkowskiEngineBackend",
-            include_dirs=[here, get_python_inc() + "/.."],
-            library_dirs=["objs"],
-            sources=["pybind/minkowski.cpp",],
-            libraries=libraries,
-            extra_compile_args=extra_compile_args,
-            extra_link_args=extra_link_args,
-        )
-    ],
+    ext_modules=ext_modules,
+    include_dirs=[str(SRC_PATH), str(SRC_PATH / "3rdparty"), *include_dirs],
     cmdclass={"build_ext": BuildExtension},
     author="Christopher Choy",
     author_email="chrischoy@ai.stanford.edu",

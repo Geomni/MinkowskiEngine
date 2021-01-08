@@ -27,11 +27,14 @@ import subprocess
 import argparse
 import logging
 from time import time
+
 # Must be imported before
 try:
     import open3d as o3d
 except ImportError:
-    raise ImportError('Please install open3d and scipy with `pip install open3d scipy`.')
+    raise ImportError(
+        "Please install open3d and scipy with `pip install open3d scipy`."
+    )
 
 import torch
 import torch.utils.data
@@ -43,34 +46,48 @@ import numpy as np
 from scipy.linalg import expm, norm
 
 import MinkowskiEngine as ME
-from examples.resnet import ResNet50
+import examples.resnet as resnets
 
-assert int(
-    o3d.__version__.split('.')[1]
-) >= 8, f'Requires open3d version >= 0.8, the current version is {o3d.__version__}'
+assert (
+    int(o3d.__version__.split(".")[1]) >= 8
+), f"Requires open3d version >= 0.8, the current version is {o3d.__version__}"
 
 ch = logging.StreamHandler(sys.stdout)
 logging.getLogger().setLevel(logging.INFO)
 logging.basicConfig(
-    format=os.uname()[1].split('.')[0] + ' %(asctime)s %(message)s',
-    datefmt='%m/%d %H:%M:%S',
-    handlers=[ch])
+    format=os.uname()[1].split(".")[0] + " %(asctime)s %(message)s",
+    datefmt="%m/%d %H:%M:%S",
+    handlers=[ch],
+)
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--voxel_size', type=float, default=0.05)
-parser.add_argument('--max_iter', type=int, default=120000)
-parser.add_argument('--val_freq', type=int, default=1000)
-parser.add_argument('--batch_size', default=256, type=int)
-parser.add_argument('--lr', default=1e-2, type=float)
-parser.add_argument('--momentum', type=float, default=0.9)
-parser.add_argument('--weight_decay', type=float, default=1e-4)
-parser.add_argument('--num_workers', type=int, default=1)
-parser.add_argument('--stat_freq', type=int, default=50)
-parser.add_argument('--weights', type=str, default='modelnet.pth')
-parser.add_argument('--load_optimizer', type=str, default='true')
+parser.add_argument("--voxel_size", type=float, default=0.01)
+parser.add_argument("--max_iter", type=int, default=120000)
+parser.add_argument("--val_freq", type=int, default=1000)
+parser.add_argument("--empty_freq", type=int, default=10)
+parser.add_argument(
+    "--sample_density",
+    type=int,
+    default=2000,
+    help="use higher number for small voxel size",
+)
+parser.add_argument("--batch_size", default=128, type=int)
+parser.add_argument("--lr", default=1e-2, type=float)
+parser.add_argument("--momentum", type=float, default=0.9)
+parser.add_argument("--weight_decay", type=float, default=1e-4)
+parser.add_argument("--num_workers", type=int, default=1)
+parser.add_argument("--stat_freq", type=int, default=50)
+parser.add_argument("--weights", type=str, default="modelnet.pth")
+parser.add_argument("--load_optimizer", type=str, default="true")
+parser.add_argument(
+    "--network",
+    type=str,
+    default="ResFieldNet50",
+    help="options: ResFieldNet14, ResFieldNet18, ResFieldNet34, ResFieldNet50, ResFieldNet101",
+)
 
-if not os.path.exists('ModelNet40'):
-    logging.info('Downloading the fixed ModelNet40 dataset...')
+if not os.path.exists("ModelNet40"):
+    logging.info("Downloading the fixed ModelNet40 dataset...")
     subprocess.run(["sh", "./examples/download_modelnet40.sh"])
 
 
@@ -105,7 +122,7 @@ class InfSampler(Sampler):
 
 
 def resample_mesh(mesh_cad, density=1):
-    '''
+    """
     https://chrischoy.github.io/research/barycentric-coordinate-for-mesh-sampling/
     Samples point cloud on the surface of the model defined as vectices and
     faces. This function uses vectorized operations so fast at the cost of some
@@ -121,13 +138,15 @@ def resample_mesh(mesh_cad, density=1):
       \begin{align}
         P = (1 - \sqrt{r_1})A + \sqrt{r_1} (1 - r_2) B + \sqrt{r_1} r_2 C
       \end{align}
-    '''
+    """
     faces = np.array(mesh_cad.triangles).astype(int)
     vertices = np.array(mesh_cad.vertices)
 
-    vec_cross = np.cross(vertices[faces[:, 0], :] - vertices[faces[:, 2], :],
-                         vertices[faces[:, 1], :] - vertices[faces[:, 2], :])
-    face_areas = np.sqrt(np.sum(vec_cross**2, 1))
+    vec_cross = np.cross(
+        vertices[faces[:, 0], :] - vertices[faces[:, 2], :],
+        vertices[faces[:, 1], :] - vertices[faces[:, 2], :],
+    )
+    face_areas = np.sqrt(np.sum(vec_cross ** 2, 1))
 
     n_samples = (np.sum(face_areas) * density).astype(int)
     # face_areas = face_areas / np.sum(face_areas)
@@ -147,7 +166,7 @@ def resample_mesh(mesh_cad, density=1):
     sample_face_idx = np.zeros((n_samples,), dtype=int)
     acc = 0
     for face_idx, _n_sample in enumerate(n_samples_per_face):
-        sample_face_idx[acc:acc + _n_sample] = face_idx
+        sample_face_idx[acc : acc + _n_sample] = face_idx
         acc += _n_sample
 
     r = np.random.rand(n_samples, 2)
@@ -155,9 +174,11 @@ def resample_mesh(mesh_cad, density=1):
     B = vertices[faces[sample_face_idx, 1], :]
     C = vertices[faces[sample_face_idx, 2], :]
 
-    P = (1 - np.sqrt(r[:, 0:1])) * A + \
-        np.sqrt(r[:, 0:1]) * (1 - r[:, 1:]) * B + \
-        np.sqrt(r[:, 0:1]) * r[:, 1:] * C
+    P = (
+        (1 - np.sqrt(r[:, 0:1])) * A
+        + np.sqrt(r[:, 0:1]) * (1 - r[:, 1:]) * B
+        + np.sqrt(r[:, 0:1]) * r[:, 1:] * C
+    )
 
     return P
 
@@ -174,26 +195,25 @@ def collate_pointcloud_fn(list_data):
     list_data = new_list_data
 
     if len(list_data) == 0:
-        raise ValueError('No data in the batch')
+        raise ValueError("No data in the batch")
 
     coords, feats, labels = list(zip(*list_data))
 
     eff_num_batch = len(coords)
     assert len(labels) == eff_num_batch
 
-    coords_batch = ME.utils.batched_coordinates(coords)
+    coords_batch = ME.utils.batched_coordinates(coords, dtype=torch.float32)
     feats_batch = torch.from_numpy(np.vstack(feats)).float()
 
     # Concatenate all lists
     return {
-        'coords': coords_batch,
-        'feats': feats_batch,
-        'labels': torch.LongTensor(labels),
+        "coords": coords_batch,
+        "feats": feats_batch,
+        "labels": torch.LongTensor(labels),
     }
 
 
 class Compose(VisionCompose):
-
     def __call__(self, *args):
         for t in self.transforms:
             args = t(*args)
@@ -201,7 +221,6 @@ class Compose(VisionCompose):
 
 
 class RandomRotation:
-
     def __init__(self, axis=None, max_theta=180):
         self.axis = axis
         self.max_theta = max_theta
@@ -209,40 +228,38 @@ class RandomRotation:
     def _M(self, axis, theta):
         return expm(np.cross(np.eye(3), axis / norm(axis) * theta))
 
-    def __call__(self, coords, feats):
+    def __call__(self, coords, feats=None):
         if self.axis is not None:
             axis = self.axis
         else:
             axis = np.random.rand(3) - 0.5
-        R = self._M(axis, (np.pi * self.max_theta / 180) * 2 *
-                    (np.random.rand(1) - 0.5))
+        R = self._M(
+            axis, (np.pi * self.max_theta / 180) * 2 * (np.random.rand(1) - 0.5)
+        )
         R_n = self._M(
-            np.random.rand(3) - 0.5,
-            (np.pi * 15 / 180) * 2 * (np.random.rand(1) - 0.5))
+            np.random.rand(3) - 0.5, (np.pi * 15 / 180) * 2 * (np.random.rand(1) - 0.5)
+        )
         return coords @ R @ R_n, feats
 
 
 class RandomScale:
-
     def __init__(self, min, max):
         self.scale = max - min
         self.bias = min
 
-    def __call__(self, coords, feats):
+    def __call__(self, coords, feats=None):
         s = self.scale * np.random.rand(1) + self.bias
         return coords * s, feats
 
 
 class RandomShear:
-
-    def __call__(self, coords, feats):
+    def __call__(self, coords, feats=None):
         T = np.eye(3) + 0.1 * np.random.randn(3, 3)
         return coords @ T, feats
 
 
 class RandomTranslation:
-
-    def __call__(self, coords, feats):
+    def __call__(self, coords, feats=None):
         trans = 0.05 * np.random.randn(1, 3)
         return coords + trans, feats
 
@@ -250,18 +267,52 @@ class RandomTranslation:
 class ModelNet40Dataset(torch.utils.data.Dataset):
     AUGMENT = None
     DATA_FILES = {
-        'train': 'train_modelnet40.txt',
-        'val': 'val_modelnet40.txt',
-        'test': 'test_modelnet40.txt'
+        "train": "train_modelnet40.txt",
+        "val": "val_modelnet40.txt",
+        "test": "test_modelnet40.txt",
     }
 
     CATEGORIES = [
-        'airplane', 'bathtub', 'bed', 'bench', 'bookshelf', 'bottle', 'bowl',
-        'car', 'chair', 'cone', 'cup', 'curtain', 'desk', 'door', 'dresser',
-        'flower_pot', 'glass_box', 'guitar', 'keyboard', 'lamp', 'laptop',
-        'mantel', 'monitor', 'night_stand', 'person', 'piano', 'plant', 'radio',
-        'range_hood', 'sink', 'sofa', 'stairs', 'stool', 'table', 'tent',
-        'toilet', 'tv_stand', 'vase', 'wardrobe', 'xbox'
+        "airplane",
+        "bathtub",
+        "bed",
+        "bench",
+        "bookshelf",
+        "bottle",
+        "bowl",
+        "car",
+        "chair",
+        "cone",
+        "cup",
+        "curtain",
+        "desk",
+        "door",
+        "dresser",
+        "flower_pot",
+        "glass_box",
+        "guitar",
+        "keyboard",
+        "lamp",
+        "laptop",
+        "mantel",
+        "monitor",
+        "night_stand",
+        "person",
+        "piano",
+        "plant",
+        "radio",
+        "range_hood",
+        "sink",
+        "sofa",
+        "stairs",
+        "stool",
+        "table",
+        "tent",
+        "toilet",
+        "tv_stand",
+        "vase",
+        "wardrobe",
+        "xbox",
     ]
 
     def __init__(self, phase, transform=None, config=None):
@@ -273,13 +324,14 @@ class ModelNet40Dataset(torch.utils.data.Dataset):
         self.voxel_size = config.voxel_size
         self.last_cache_percent = 0
 
-        self.root = './ModelNet40'
-        self.files = open(os.path.join(self.root,
-                                       self.DATA_FILES[phase])).read().split()
+        self.root = "./ModelNet40"
+        self.files = (
+            open(os.path.join(self.root, self.DATA_FILES[phase])).read().split()
+        )
         logging.info(
             f"Loading the subset {phase} from {self.root} with {len(self.files)} files"
         )
-        self.density = 4000
+        self.density = config.sample_density
 
         # Ignore warnings in obj loader
         o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)
@@ -289,7 +341,7 @@ class ModelNet40Dataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         mesh_file = os.path.join(self.root, self.files[idx])
-        category = self.files[idx].split('/')[0]
+        category = self.files[idx].split("/")[0]
         label = self.CATEGORIES.index(category)
         if idx in self.cache:
             xyz = self.cache[idx]
@@ -301,39 +353,51 @@ class ModelNet40Dataset(torch.utils.data.Dataset):
             vertices = np.asarray(pcd.vertices)
             vmax = vertices.max(0, keepdims=True)
             vmin = vertices.min(0, keepdims=True)
-            pcd.vertices = o3d.utility.Vector3dVector((vertices - vmin) /
-                                                      (vmax - vmin).max() + 0.5)
+            pcd.vertices = o3d.utility.Vector3dVector(
+                (vertices - vmin) / (vmax - vmin).max() + 0.5
+            )
 
             # Oversample points and copy
             xyz = resample_mesh(pcd, density=self.density)
+            for i in range(1, 3):
+                if len(np.unique(np.floor(xyz / self.voxel_size), axis=0)) < 1000:
+                    logging.info(
+                        f"Resampling attempt # {i} with density {self.density * 2 ** i}"
+                    )
+                    xyz = resample_mesh(pcd, density=self.density * 2 ** i)
+
             self.cache[idx] = xyz
             cache_percent = int((len(self.cache) / len(self)) * 100)
-            if cache_percent > 0 and cache_percent % 10 == 0 and cache_percent != self.last_cache_percent:
+            if (
+                cache_percent > 0
+                and cache_percent % 10 == 0
+                and cache_percent != self.last_cache_percent
+            ):
                 logging.info(
                     f"Cached {self.phase}: {len(self.cache)} / {len(self)}: {cache_percent}%"
                 )
                 self.last_cache_percent = cache_percent
 
-        # Use color or other features if available
-        feats = np.ones((len(xyz), 1))
-
         if len(xyz) < 1000:
             logging.info(
-                f"Skipping {mesh_file}: does not have sufficient CAD sampling density after resampling: {len(xyz)}."
+                f"Skipping {mesh_file}: does not have sufficient CAD sampling density after resampling. Length: {len(xyz)}."
             )
             return None
 
         if self.transform:
-            xyz, feats = self.transform(xyz, feats)
+            xyz, _ = self.transform(xyz, None)
 
         # Get coords
-        coords = np.floor(xyz / self.voxel_size)
+        coords = xyz / self.voxel_size
+        # Use coords or other features if available
+        feats = xyz
 
-        return (coords, xyz, label)
+        return (coords, feats, label)
 
 
-def make_data_loader(phase, augment_data, batch_size, shuffle, num_workers,
-                     repeat, config):
+def make_data_loader(
+    phase, augment_data, batch_size, shuffle, num_workers, repeat, config
+):
     transformations = []
     if augment_data:
         transformations.append(RandomRotation(axis=np.array([0, 0, 1])))
@@ -341,47 +405,46 @@ def make_data_loader(phase, augment_data, batch_size, shuffle, num_workers,
         transformations.append(RandomScale(0.8, 1.2))
         transformations.append(RandomShear())
 
-    dset = ModelNet40Dataset(
-        phase, transform=Compose(transformations), config=config)
+    dset = ModelNet40Dataset(phase, transform=Compose(transformations), config=config)
 
     args = {
-        'batch_size': batch_size,
-        'num_workers': num_workers,
-        'collate_fn': collate_pointcloud_fn,
-        'pin_memory': False,
-        'drop_last': False
+        "batch_size": batch_size,
+        "num_workers": num_workers,
+        "collate_fn": collate_pointcloud_fn,
+        "pin_memory": False,
+        "drop_last": False,
     }
 
     if repeat:
-        args['sampler'] = InfSampler(dset, shuffle)
+        args["sampler"] = InfSampler(dset, shuffle)
     else:
-        args['shuffle'] = shuffle
+        args["shuffle"] = shuffle
 
     loader = torch.utils.data.DataLoader(dset, **args)
 
     return loader
 
 
-def test(net, test_iter, config, phase='val'):
+def test(net, test_iter, config, phase="val"):
     net.eval()
     num_correct, tot_num = 0, 0
     for i in range(len(test_iter)):
         data_dict = test_iter.next()
-        sin = ME.SparseTensor(
-            data_dict['coords'][:, :3] * config.voxel_size,
-            data_dict['coords'].int(),
-            allow_duplicate_coords=True,  # for classification, it doesn't matter
-        ).to(device)
-        sout = net(sin)
-        is_correct = data_dict['labels'] == torch.argmax(sout.F, 1).cpu()
+        tfield = ME.TensorField(data_dict["feats"], data_dict["coords"], device=device)
+        sout = net(tfield)
+        is_correct = data_dict["labels"] == torch.argmax(sout.F, 1).cpu()
         num_correct += is_correct.sum().item()
         tot_num += len(sout)
 
+        if i % config.empty_freq == 0:
+            torch.cuda.empty_cache()
+
         if i % config.stat_freq == 0:
             logging.info(
-                f'{phase} set iter: {i} / {len(test_iter)}, Accuracy : {num_correct / tot_num:.3e}'
+                f"{phase} set iter: {i} / {len(test_iter)}, Accuracy : {num_correct / tot_num:.3e}"
             )
-    logging.info(f'{phase} set accuracy : {num_correct / tot_num:.3e}')
+
+    logging.info(f"{phase} set accuracy : {num_correct / tot_num:.3e}")
 
 
 def train(net, device, config):
@@ -389,41 +452,47 @@ def train(net, device, config):
         net.parameters(),
         lr=config.lr,
         momentum=config.momentum,
-        weight_decay=config.weight_decay)
-    scheduler = optim.lr_scheduler.ExponentialLR(optimizer, 0.95)
+        weight_decay=config.weight_decay,
+    )
+    scheduler = optim.lr_scheduler.ExponentialLR(
+        optimizer,
+        0.999,
+    )
 
     crit = torch.nn.CrossEntropyLoss()
 
     train_dataloader = make_data_loader(
-        'train',
+        "train",
         augment_data=True,
         batch_size=config.batch_size,
         shuffle=True,
         num_workers=config.num_workers,
         repeat=True,
-        config=config)
+        config=config,
+    )
     val_dataloader = make_data_loader(
-        'val',
+        "val",
         augment_data=False,
         batch_size=config.batch_size,
         shuffle=True,
         num_workers=config.num_workers,
         repeat=True,
-        config=config)
+        config=config,
+    )
 
     curr_iter = 0
     if os.path.exists(config.weights):
         checkpoint = torch.load(config.weights)
-        net.load_state_dict(checkpoint['state_dict'])
-        if config.load_optimizer.lower() == 'true':
-            curr_iter = checkpoint['curr_iter'] + 1
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            scheduler.load_state_dict(checkpoint['scheduler'])
+        net.load_state_dict(checkpoint["state_dict"])
+        if config.load_optimizer.lower() == "true":
+            curr_iter = checkpoint["curr_iter"] + 1
+            optimizer.load_state_dict(checkpoint["optimizer"])
+            scheduler.load_state_dict(checkpoint["scheduler"])
 
     net.train()
     train_iter = iter(train_dataloader)
     val_iter = iter(val_dataloader)
-    logging.info(f'LR: {scheduler.get_lr()}')
+    logging.info(f"LR: {scheduler.get_lr()}")
     for i in range(curr_iter, config.max_iter):
 
         s = time()
@@ -431,60 +500,66 @@ def train(net, device, config):
         d = time() - s
 
         optimizer.zero_grad()
-        sin = ME.SparseTensor(
-            data_dict['coords'][:, :3] * config.voxel_size,
-            data_dict['coords'].int(),
-            allow_duplicate_coords=True,  # for classification, it doesn't matter
-        ).to(device)
+        sin = ME.TensorField(data_dict["feats"], data_dict["coords"], device=device)
         sout = net(sin)
-        loss = crit(sout.F, data_dict['labels'].to(device))
+        loss = crit(sout.F, data_dict["labels"].to(device))
         loss.backward()
         optimizer.step()
         t = time() - s
 
+        if i % config.empty_freq == 0:
+            torch.cuda.empty_cache()
+
         if i % config.stat_freq == 0:
             logging.info(
-                f'Iter: {i}, Loss: {loss.item():.3e}, Data Loading Time: {d:.3e}, Tot Time: {t:.3e}'
+                f"Iter: {i}, Loss: {loss.item():.3e}, Data Loading Time: {d:.3e}, Tot Time: {t:.3e}"
             )
 
         if i % config.val_freq == 0 and i > 0:
             torch.save(
                 {
-                    'state_dict': net.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'scheduler': scheduler.state_dict(),
-                    'curr_iter': i,
-                }, config.weights)
+                    "state_dict": net.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "scheduler": scheduler.state_dict(),
+                    "curr_iter": i,
+                },
+                config.weights,
+            )
 
             # Validation
-            logging.info('Validation')
-            test(net, val_iter, config, 'val')
+            logging.info("Validation")
+            test(net, val_iter, config, "val")
 
-            scheduler.step()
-            logging.info(f'LR: {scheduler.get_lr()}')
+            logging.info(f"LR: {scheduler.get_lr()}")
 
             net.train()
 
+            # one epoch
+            scheduler.step()
 
-if __name__ == '__main__':
-    print('Warning: This process will cache the entire voxelized ModelNet40 dataset, which will take up ~10G of memory.')
+
+if __name__ == "__main__":
+    print(
+        "Warning: This process will cache the entire voxelized ModelNet40 dataset, which will take up ~10G of memory."
+    )
 
     config = parser.parse_args()
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    net = ResNet50(3, 40, D=3)
+    net = getattr(resnets, config.network)(3, 40, D=3)
     net.to(device)
 
     train(net, device, config)
 
     test_dataloader = make_data_loader(
-        'test',
+        "test",
         augment_data=False,
         batch_size=config.batch_size,
         shuffle=True,
         num_workers=config.num_workers,
         repeat=False,
-        config=config)
+        config=config,
+    )
 
-    logging.info('Test')
-    test(net, iter(test_dataloader), config, 'test')
+    logging.info("Test")
+    test(net, iter(test_dataloader), config, "test")

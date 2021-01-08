@@ -21,65 +21,180 @@
 # Please cite "4D Spatio-Temporal ConvNets: Minkowski Convolutional Neural
 # Networks", CVPR'19 (https://arxiv.org/abs/1904.08755) if you use any part
 # of the code.
+from typing import Union
+
 import torch
-from torch.nn import Module
+import torch.nn as nn
 
-from SparseTensor import SparseTensor
+from MinkowskiCommon import MinkowskiModuleBase
+from MinkowskiSparseTensor import SparseTensor
+from MinkowskiTensorField import TensorField
 
 
-class MinkowskiModuleBase(Module):
+class MinkowskiNonlinearityBase(MinkowskiModuleBase):
     MODULE = None
 
     def __init__(self, *args, **kwargs):
-        super(MinkowskiModuleBase, self).__init__()
+        super(MinkowskiNonlinearityBase, self).__init__()
         self.module = self.MODULE(*args, **kwargs)
 
     def forward(self, input):
         output = self.module(input.F)
-        return SparseTensor(
-            output,
-            coords_key=input.coords_key,
-            coords_manager=input.coords_man)
+        if isinstance(input, TensorField):
+            return TensorField(
+                output,
+                coordinate_field_map_key=input.coordinate_field_map_key,
+                coordinate_manager=input.coordinate_manager,
+                quantization_mode=input.quantization_mode,
+            )
+        else:
+            return SparseTensor(
+                output,
+                coordinate_map_key=input.coordinate_map_key,
+                coordinate_manager=input.coordinate_manager,
+            )
 
     def __repr__(self):
-        return self.__class__.__name__ + '()'
+        return self.__class__.__name__ + "()"
 
 
-class MinkowskiReLU(MinkowskiModuleBase):
-    MODULE = torch.nn.ReLU
-
-
-class MinkowskiPReLU(MinkowskiModuleBase):
-    MODULE = torch.nn.PReLU
-
-
-class MinkowskiELU(MinkowskiModuleBase):
+class MinkowskiELU(MinkowskiNonlinearityBase):
     MODULE = torch.nn.ELU
 
 
-class MinkowskiSELU(MinkowskiModuleBase):
+class MinkowskiHardshrink(MinkowskiNonlinearityBase):
+    MODULE = torch.nn.Hardshrink
+
+
+class MinkowskiHardsigmoid(MinkowskiNonlinearityBase):
+    MODULE = torch.nn.Hardsigmoid
+
+
+class MinkowskiHardtanh(MinkowskiNonlinearityBase):
+    MODULE = torch.nn.Hardtanh
+
+
+class MinkowskiHardswish(MinkowskiNonlinearityBase):
+    MODULE = torch.nn.Hardswish
+
+
+class MinkowskiLeakyReLU(MinkowskiNonlinearityBase):
+    MODULE = torch.nn.LeakyReLU
+
+
+class MinkowskiLogSigmoid(MinkowskiNonlinearityBase):
+    MODULE = torch.nn.LogSigmoid
+
+
+class MinkowskiPReLU(MinkowskiNonlinearityBase):
+    MODULE = torch.nn.PReLU
+
+
+class MinkowskiReLU(MinkowskiNonlinearityBase):
+    MODULE = torch.nn.ReLU
+
+
+class MinkowskiReLU6(MinkowskiNonlinearityBase):
+    MODULE = torch.nn.ReLU6
+
+
+class MinkowskiRReLU(MinkowskiNonlinearityBase):
+    MODULE = torch.nn.RReLU
+
+
+class MinkowskiSELU(MinkowskiNonlinearityBase):
     MODULE = torch.nn.SELU
 
 
-class MinkowskiCELU(MinkowskiModuleBase):
+class MinkowskiCELU(MinkowskiNonlinearityBase):
     MODULE = torch.nn.CELU
 
 
-class MinkowskiDropout(MinkowskiModuleBase):
-    MODULE = torch.nn.Dropout
+class MinkowskiGELU(MinkowskiNonlinearityBase):
+    MODULE = torch.nn.GELU
 
 
-class MinkowskiThreshold(MinkowskiModuleBase):
-    MODULE = torch.nn.Threshold
-
-
-class MinkowskiSigmoid(MinkowskiModuleBase):
+class MinkowskiSigmoid(MinkowskiNonlinearityBase):
     MODULE = torch.nn.Sigmoid
 
 
-class MinkowskiTanh(MinkowskiModuleBase):
+class MinkowskiSiLU(MinkowskiNonlinearityBase):
+    MODULE = torch.nn.SiLU
+
+
+class MinkowskiSoftplus(MinkowskiNonlinearityBase):
+    MODULE = torch.nn.Softplus
+
+
+class MinkowskiSoftshrink(MinkowskiNonlinearityBase):
+    MODULE = torch.nn.Softshrink
+
+
+class MinkowskiSoftsign(MinkowskiNonlinearityBase):
+    MODULE = torch.nn.Softsign
+
+
+class MinkowskiTanh(MinkowskiNonlinearityBase):
     MODULE = torch.nn.Tanh
 
 
-class MinkowskiSoftmax(MinkowskiModuleBase):
+class MinkowskiTanhshrink(MinkowskiNonlinearityBase):
+    MODULE = torch.nn.Tanhshrink
+
+
+class MinkowskiThreshold(MinkowskiNonlinearityBase):
+    MODULE = torch.nn.Threshold
+
+
+# Non-linear Activations (other)
+class MinkowskiSoftmin(MinkowskiNonlinearityBase):
+    MODULE = torch.nn.Softmin
+
+
+class MinkowskiSoftmax(MinkowskiNonlinearityBase):
     MODULE = torch.nn.Softmax
+
+
+class MinkowskiLogSoftmax(MinkowskiNonlinearityBase):
+    MODULE = torch.nn.LogSoftmax
+
+
+class MinkowskiAdaptiveLogSoftmaxWithLoss(MinkowskiNonlinearityBase):
+    MODULE = torch.nn.AdaptiveLogSoftmaxWithLoss
+
+
+# Dropouts
+class MinkowskiDropout(MinkowskiNonlinearityBase):
+    MODULE = torch.nn.Dropout
+
+
+class MinkowskiAlphaDropout(MinkowskiNonlinearityBase):
+    MODULE = torch.nn.AlphaDropout
+
+
+class MinkowskiSinusoidal(MinkowskiModuleBase):
+    def __init__(self, in_channel, out_channel):
+        MinkowskiModuleBase.__init__(self)
+        self.in_channel = in_channel
+        self.out_channel = out_channel
+        self.kernel = nn.Parameter(torch.rand(in_channel, out_channel))
+        self.bias = nn.Parameter(torch.rand(1, out_channel))
+        self.coef = nn.Parameter(torch.rand(1, out_channel))
+
+    def forward(self, input: Union[SparseTensor, TensorField]):
+
+        out_F = torch.sin(input.F.mm(self.kernel) + self.bias) * self.coef
+
+        if isinstance(input, TensorField):
+            return TensorField(
+                out_F,
+                coordinate_field_map_key=input.coordinate_field_map_key,
+                coordinate_manager=input.coordinate_manager,
+                quantization_mode=input.quantization_mode,
+            )
+        else:
+            return SparseTensor(
+                out_F,
+                coordinate_map_key=input.coordinate_map_key,
+                coordinate_manager=input.coordinate_manager,
+            )

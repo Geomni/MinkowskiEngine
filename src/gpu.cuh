@@ -29,7 +29,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <curand.h>
-#include <cusparse_v2.h>
+#include <cusparse.h>
 #include <driver_types.h> // cuda driver types
 
 #include <thrust/device_vector.h>
@@ -147,20 +147,22 @@ const char *cublasGetErrorString(cublasStatus_t error);
 // CUSparse error reporting.
 const char *cusparseGetErrorString(cusparseStatus_t error);
 
-constexpr int CUDA_NUM_THREADS = 256;
+constexpr uint32_t CUDA_NUM_THREADS = 128;
 
-constexpr int SHARED_BLOCK_SIZE = 32;
+constexpr uint32_t SHARED_BLOCK_SIZE = 32;
 
-constexpr int MAX_GRID = 65535;
+constexpr uint32_t MAX_GRID = 65535;
 
-inline int GET_BLOCKS(const int N) {
-  return (N + CUDA_NUM_THREADS - 1) / CUDA_NUM_THREADS;
+inline int GET_BLOCKS(const uint32_t N, const uint32_t THREADS) {
+  return std::max((N + THREADS - 1) / THREADS, uint32_t(1));
 }
 
 template <typename Dtype> void print(const thrust::device_vector<Dtype> &v);
 template <typename Dtype1, typename Dtype2>
 void print(const thrust::device_vector<Dtype1> &v1,
            const thrust::device_vector<Dtype2> &v2);
+
+std::pair<size_t, size_t> get_memory_info();
 
 } // end namespace minkowski
 

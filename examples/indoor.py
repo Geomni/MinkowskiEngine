@@ -121,14 +121,21 @@ if __name__ == '__main__':
     # Measure time
     with torch.no_grad():
         voxel_size = 0.02
-
         # Feed-forward pass and get the prediction
-        sinput = ME.SparseTensor(
-            feats=torch.from_numpy(colors).float(),
-            coords=ME.utils.batched_coordinates([coords / voxel_size]),
-            quantization_mode=ME.SparseTensorQuantizationMode.UNWEIGHTED_AVERAGE
-        ).to(device)
-        logits = model(sinput).slice(sinput)
+        in_field = ME.TensorField(
+            features=torch.from_numpy(colors).float(),
+            coordinates=ME.utils.batched_coordinates([coords / voxel_size], dtype=torch.float32),
+            quantization_mode=ME.SparseTensorQuantizationMode.UNWEIGHTED_AVERAGE,
+            minkowski_algorithm=ME.MinkowskiAlgorithm.SPEED_OPTIMIZED,
+            device=device,
+        )
+        # Convert to a sparse tensor
+        sinput = in_field.sparse()
+        # Output sparse tensor
+        soutput = model(sinput)
+        # get the prediction on the input tensor field
+        out_field = soutput.slice(in_field)
+        logits = out_field.F
 
     _, pred = logits.max(1)
     pred = pred.cpu().numpy()
@@ -139,6 +146,7 @@ if __name__ == '__main__':
     colors = np.array([SCANNET_COLOR_MAP[VALID_CLASS_IDS[l]] for l in pred])
     pred_pcd.points = o3d.utility.Vector3dVector(coords)
     pred_pcd.colors = o3d.utility.Vector3dVector(colors / 255)
+    pred_pcd.estimate_normals()
 
     # Move the original point cloud
     pcd.points = o3d.utility.Vector3dVector(

@@ -27,7 +27,7 @@ import logging
 import collections.abc
 
 
-def batched_coordinates(coords):
+def batched_coordinates(coords, dtype=torch.int32, device=None):
     r"""Create a `ME.SparseTensor` coordinates from a sequence of coordinates
 
     Given a list of either numpy or pytorch tensor coordinates, return the
@@ -37,8 +37,10 @@ def batched_coordinates(coords):
         :attr:`coords` (a sequence of `torch.Tensor` or `numpy.ndarray`): a
         list of coordinates.
 
+        :attr:`dtype`: torch data type of the return tensor. torch.int32 by default.
+
     Returns:
-        :attr:`coords` (`torch.IntTensor`): a batched coordinates.
+        :attr:`batched_coordindates` (`torch.Tensor`): a batched coordinates.
 
     .. warning::
 
@@ -46,36 +48,52 @@ def batched_coordinates(coords):
 
     """
     assert isinstance(
-        coords, collections.abc.Sequence), "The coordinates must be a sequence."
-    assert np.array([cs.ndim == 2 for cs in coords]).all(), \
-        "All coordinates must be in a 2D array."
+        coords, collections.abc.Sequence
+    ), "The coordinates must be a sequence."
+    assert np.array(
+        [cs.ndim == 2 for cs in coords]
+    ).all(), "All coordinates must be in a 2D array."
     D = np.unique(np.array([cs.shape[1] for cs in coords]))
     assert len(D) == 1, f"Dimension of the array mismatch. All dimensions: {D}"
     D = D[0]
+    if device is None:
+        if isinstance(coords, torch.Tensor):
+            device = coords[0].device
+        else:
+            device = "cpu"
+    assert dtype in [
+        torch.int32,
+        torch.float32,
+    ], "Only torch.int32, torch.float32 supported for coordinates."
 
     # Create a batched coordinates
     N = np.array([len(cs) for cs in coords]).sum()
-    bcoords = torch.IntTensor(N, D + 1)  # uninitialized
+    bcoords = torch.zeros((N, D + 1), dtype=dtype, device=device)  # uninitialized
 
     s = 0
     for b, cs in enumerate(coords):
-        if isinstance(cs, np.ndarray):
-            cs = torch.from_numpy(np.floor(cs).astype(np.int32))
-        else:
-            if isinstance(cs, torch.IntTensor) or isinstance(cs, torch.LongTensor):
-                cs = cs
-            else:
+        if dtype == torch.int32:
+            if isinstance(cs, np.ndarray):
+                cs = torch.from_numpy(np.floor(cs))
+            elif not (
+                isinstance(cs, torch.IntTensor) or isinstance(cs, torch.LongTensor)
+            ):
                 cs = cs.floor()
+
+            cs = cs.int()
+        else:
+            if isinstance(cs, np.ndarray):
+                cs = torch.from_numpy(cs)
 
         cn = len(cs)
         # BATCH_FIRST:
-        bcoords[s:s + cn, 1:] = cs.int()
-        bcoords[s:s + cn, 0] = b
+        bcoords[s : s + cn, 1:] = cs
+        bcoords[s : s + cn, 0] = b
         s += cn
     return bcoords
 
 
-def sparse_collate(coords, feats, labels=None):
+def sparse_collate(coords, feats, labels=None, dtype=torch.int32, device=None):
     r"""Create input arguments for a sparse tensor `the documentation
     <https://nvidia.github.io/MinkowskiEngine/sparse_tensor.html>`_.
 
@@ -93,17 +111,29 @@ def sparse_collate(coords, feats, labels=None):
     """
     use_label = False if labels is None else True
     feats_batch, labels_batch = [], []
-    assert isinstance(coords, collections.abc.Sequence), \
-            "The coordinates must be a sequence of arrays or tensors."
-    assert isinstance(feats, collections.abc.Sequence), \
-            "The features must be a sequence of arrays or tensors."
+    assert isinstance(
+        coords, collections.abc.Sequence
+    ), "The coordinates must be a sequence of arrays or tensors."
+    assert isinstance(
+        feats, collections.abc.Sequence
+    ), "The features must be a sequence of arrays or tensors."
     D = np.unique(np.array([cs.shape[1] for cs in coords]))
     assert len(D) == 1, f"Dimension of the array mismatch. All dimensions: {D}"
     D = D[0]
+    if device is None:
+        if isinstance(coords, torch.Tensor):
+            device = coords[0].device
+        else:
+            device = "cpu"
+    assert dtype in [
+        torch.int32,
+        torch.float32,
+    ], "Only torch.int32, torch.float32 supported for coordinates."
 
     if use_label:
-        assert isinstance(labels, collections.abc.Sequence), \
-            "The labels must be a sequence of arrays or tensors."
+        assert isinstance(
+            labels, collections.abc.Sequence
+        ), "The labels must be a sequence of arrays or tensors."
 
     N = np.array([len(cs) for cs in coords]).sum()
     Nf = np.array([len(fs) for fs in feats]).sum()
@@ -111,20 +141,23 @@ def sparse_collate(coords, feats, labels=None):
 
     batch_id = 0
     s = 0  # start index
-    bcoords = torch.IntTensor(N, D + 1)  # uninitialized batched coords
+    bcoords = torch.zeros((N, D + 1), dtype=dtype, device=device)  # uninitialized
     for coord, feat in zip(coords, feats):
         if isinstance(coord, np.ndarray):
             coord = torch.from_numpy(coord)
         else:
-            assert isinstance(coord, torch.Tensor), \
-                "Coords must be of type numpy.ndarray or torch.Tensor"
-        coord = coord.int()
+            assert isinstance(
+                coord, torch.Tensor
+            ), "Coords must be of type numpy.ndarray or torch.Tensor"
+        if dtype == torch.int32 and coord.dtype in [torch.float32, torch.float64]:
+            coord = coord.floor()
 
         if isinstance(feat, np.ndarray):
             feat = torch.from_numpy(feat)
         else:
-            assert isinstance(feat, torch.Tensor), \
-                "Features must be of type numpy.ndarray or torch.Tensor"
+            assert isinstance(
+                feat, torch.Tensor
+            ), "Features must be of type numpy.ndarray or torch.Tensor"
 
         # Labels
         if use_label:
@@ -135,8 +168,8 @@ def sparse_collate(coords, feats, labels=None):
 
         cn = coord.shape[0]
         # Batched coords
-        bcoords[s:s + cn, 1:] = coord
-        bcoords[s:s + cn, 0] = batch_id
+        bcoords[s : s + cn, 1:] = coord
+        bcoords[s : s + cn, 0] = batch_id
 
         # Features
         feats_batch.append(feat)
@@ -155,7 +188,7 @@ def sparse_collate(coords, feats, labels=None):
         return bcoords, feats_batch
 
 
-def batch_sparse_collate(data):
+def batch_sparse_collate(data, dtype=torch.int32, device=None):
     r"""The wrapper function that can be used in in conjunction with
     `torch.utils.data.DataLoader` to generate inputs for a sparse tensor.
 
@@ -167,7 +200,7 @@ def batch_sparse_collate(data):
         :attr:`data`: list of (coordinates, features, labels) tuples.
 
     """
-    return sparse_collate(*list(zip(*data)))
+    return sparse_collate(*list(zip(*data)), dtype=dtype, device=device)
 
 
 class SparseCollation:
@@ -193,8 +226,10 @@ class SparseCollation:
 
     """
 
-    def __init__(self, limit_numpoints=-1):
+    def __init__(self, limit_numpoints=-1, dtype=torch.int32, device=None):
         self.limit_numpoints = limit_numpoints
+        self.dtype = dtype
+        self.device = device
 
     def __call__(self, list_data):
         coords, feats, labels = list(zip(*list_data))
@@ -208,14 +243,21 @@ class SparseCollation:
                 num_full_points = sum(len(c) for c in coords)
                 num_full_batch_size = len(coords)
                 logging.warning(
-                    f'\tCannot fit {num_full_points} points into'
-                    ' {self.limit_numpoints} points limit. Truncating batch '
-                    f'size at {batch_id} out of {num_full_batch_size} with '
-                    f'{batch_num_points - num_points}.')
+                    f"\tCannot fit {num_full_points} points into"
+                    " {self.limit_numpoints} points limit. Truncating batch "
+                    f"size at {batch_id} out of {num_full_batch_size} with "
+                    f"{batch_num_points - num_points}."
+                )
                 break
             coords_batch.append(coords[batch_id])
             feats_batch.append(feats[batch_id])
             labels_batch.append(labels[batch_id])
 
         # Concatenate all lists
-        return sparse_collate(coords_batch, feats_batch, labels_batch)
+        return sparse_collate(
+            coords_batch,
+            feats_batch,
+            labels_batch,
+            dtype=self.dtype,
+            device=self.device,
+        )
