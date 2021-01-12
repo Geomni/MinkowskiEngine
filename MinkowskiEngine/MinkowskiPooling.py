@@ -53,6 +53,7 @@ class MinkowskiLocalPoolingFunction(Function):
                 in_coordinate_map_key.get_coordinate_size()
             )
 
+        input_features = input_features.contiguous()
         ctx.input_features = input_features
         ctx = save_ctx(
             ctx,
@@ -81,6 +82,7 @@ class MinkowskiLocalPoolingFunction(Function):
 
     @staticmethod
     def backward(ctx, grad_out_feat):
+        grad_out_feat = grad_out_feat.contiguous()
         bw_fn = get_minkowski_function("LocalPoolingBackward", grad_out_feat)
         grad_in_feat = bw_fn(
             ctx.input_features,
@@ -619,8 +621,7 @@ class MinkowskiGlobalPoolingFunction(Function):
             out_coordinate_map_key = CoordinateMapKey(
                 in_coordinate_map_key.get_coordinate_size()
             )
-        if not input_features.is_contiguous():
-            input_features = input_features.contiguous()
+        input_features = input_features.contiguous()
 
         ctx.input_features = input_features
         ctx.in_coords_key = in_coordinate_map_key
@@ -643,6 +644,7 @@ class MinkowskiGlobalPoolingFunction(Function):
 
     @staticmethod
     def backward(ctx, grad_out_feat):
+        grad_out_feat = grad_out_feat.contiguous()
         bw_fn = get_minkowski_function("GlobalPoolingBackward", grad_out_feat)
         grad_in_feat = bw_fn(
             ctx.input_features,
@@ -658,22 +660,18 @@ class MinkowskiGlobalPoolingFunction(Function):
 
 class MinkowskiGlobalPooling(MinkowskiModuleBase):
     r"""Pool all input features to one output.
-
-    .. math::
-
-        \mathbf{y} = \frac{1}{|\mathcal{C}^\text{in}|} \sum_{\mathbf{i} \in
-        \mathcal{C}^\text{in}} \mathbf{x}_{\mathbf{i}}
-
     """
 
-    def __init__(self, mode: PoolingMode):
+    def __init__(self, mode: PoolingMode = PoolingMode.GLOBAL_AVG_POOLING_DEFAULT):
         r"""Reduces sparse coords into points at origin, i.e. reduce each point
         cloud into a point at the origin, returning batch_size number of points
         [[0, 0, ..., 0], [0, 0, ..., 1],, [0, 0, ..., 2]] where the last elem
-        of the coords is the batch index.
+        of the coords is the batch index. The reduction function should be
+        provided as the mode.
 
         Args:
-            :attr:`mode` (PoolingMode):
+            :attr:`mode` (PoolingMode): Reduction function mode. E.g.
+            `PoolingMode.GLOBAL_SUM_POOLING_DEFAULT`
 
         """
         super(MinkowskiGlobalPooling, self).__init__()
@@ -710,7 +708,7 @@ class MinkowskiGlobalPooling(MinkowskiModuleBase):
 
 
 class MinkowskiGlobalSumPooling(MinkowskiGlobalPooling):
-    def __init__(self, mode=PoolingMode.GLOBAL_SUM_POOLING_KERNEL):
+    def __init__(self, mode=PoolingMode.GLOBAL_SUM_POOLING_PYTORCH_INDEX):
         r"""Reduces sparse coords into points at origin, i.e. reduce each point
         cloud into a point at the origin, returning batch_size number of points
         [[0, 0, ..., 0], [0, 0, ..., 1],, [0, 0, ..., 2]] where the last elem
@@ -721,7 +719,7 @@ class MinkowskiGlobalSumPooling(MinkowskiGlobalPooling):
 
 
 class MinkowskiGlobalAvgPooling(MinkowskiGlobalPooling):
-    def __init__(self, mode=PoolingMode.GLOBAL_AVG_POOLING_KERNEL):
+    def __init__(self, mode=PoolingMode.GLOBAL_AVG_POOLING_PYTORCH_INDEX):
         r"""Reduces sparse coords into points at origin, i.e. reduce each point
         cloud into a point at the origin, returning batch_size number of points
         [[0, 0, ..., 0], [0, 0, ..., 1],, [0, 0, ..., 2]] where the last elem
@@ -741,7 +739,7 @@ class MinkowskiGlobalMaxPooling(MinkowskiGlobalPooling):
 
     """
 
-    def __init__(self, mode=PoolingMode.GLOBAL_MAX_POOLING_KERNEL):
+    def __init__(self, mode=PoolingMode.GLOBAL_MAX_POOLING_PYTORCH_INDEX):
         r"""Reduces sparse coords into points at origin, i.e. reduce each point
         cloud into a point at the origin, returning batch_size number of points
         [[0, 0, ..., 0], [0, 0, ..., 1],, [0, 0, ..., 2]] where the last elem

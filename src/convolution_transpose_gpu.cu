@@ -54,6 +54,7 @@ at::Tensor ConvolutionTransposeForwardGPU(
     RegionType::Type const region_type,                //
     at::Tensor const &offset,                          //
     bool generate_new_coordinates,                     //
+    ConvolutionMode::Type const convolution_mode,      //
     CoordinateMapKey *p_in_map_key,                    //
     CoordinateMapKey *p_out_map_key,                   //
     gpu_manager_type<coordinate_type, TemplatedAllocator> *p_map_manager) {
@@ -84,7 +85,7 @@ at::Tensor ConvolutionTransposeForwardGPU(
   ASSERT(in_feat.size(0) == p_map_manager->size(in_key), "Invalid in_feat size",
          in_feat.size(0), "!=", p_map_manager->size(in_key));
 
-  if (!p_out_map_key->is_key_set() || generate_new_coordinates) {
+  if (!p_out_map_key->is_key_set()) {
     auto map_it = p_map_manager->find(p_in_map_key->get_key());
     ASSERT(map_it != p_map_manager->map_end(), ERROR_MAP_NOT_FOUND);
     auto const &in_map = (*map_it).second;
@@ -103,7 +104,7 @@ at::Tensor ConvolutionTransposeForwardGPU(
     );
 
     coordinate_map_key_type out_key = std::get<0>(p_map_manager->stride_region(
-        in_key, kernel_region, generate_new_coordinates));
+        in_key, kernel_region, out_tensor_stride, generate_new_coordinates));
     LOG_DEBUG("ConvolutionTranspose out key:", out_key);
     p_out_map_key->set_key(out_key);
   }
@@ -135,6 +136,7 @@ at::Tensor ConvolutionTransposeForwardGPU(
 
   AT_DISPATCH_FLOATING_TYPES(
       in_feat.scalar_type(), "convolution_transpose_forward_gpu", [&] {
+        TemplatedAllocator<char> byte_allocator;
         ConvolutionForwardKernelGPU<scalar_t, default_types::index_type,
                                     TemplatedAllocator<char>>(
             in_feat.template data_ptr<scalar_t>(),  //
@@ -143,7 +145,11 @@ at::Tensor ConvolutionTransposeForwardGPU(
             out_feat.size(1),                       //
             kernel.template data_ptr<scalar_t>(),   //
             in_out,                                 //
-            out_nrows, handle, stream);
+            in_feat.size(0),                        //
+            out_nrows,                              //
+            byte_allocator,                         //
+            p_map_manager->algorithm(),             //
+            convolution_mode, handle, stream);
       });
 
   return out_feat;
@@ -160,6 +166,7 @@ std::pair<at::Tensor, at::Tensor> ConvolutionTransposeBackwardGPU(
     default_types::stride_type const &kernel_dilation, //
     RegionType::Type const region_type,                //
     at::Tensor const &offset,                          //
+    ConvolutionMode::Type const convolution_mode,      //
     CoordinateMapKey *p_in_map_key,                    //
     CoordinateMapKey *p_out_map_key,                   //
     gpu_manager_type<coordinate_type, TemplatedAllocator> *p_map_manager) {
@@ -220,9 +227,11 @@ std::pair<at::Tensor, at::Tensor> ConvolutionTransposeBackwardGPU(
             kernel.template data_ptr<scalar_t>(),        //
             grad_kernel.template data_ptr<scalar_t>(),   //
             in_out,                                      //
+            in_feat.size(0),                             //
             grad_out_feat.size(0),                       //
             byte_allocator,                              //
             p_map_manager->algorithm(),                  //
+            convolution_mode,                            //
             handle, stream);
       });
 
@@ -242,6 +251,7 @@ ConvolutionTransposeForwardGPU<default_types::dcoordinate_type,
     RegionType::Type const region_type,                //
     at::Tensor const &offset,                          //
     bool generate_new_coordinates,                     //
+    ConvolutionMode::Type const convolution_mode,      //
     CoordinateMapKey *p_in_map_key,                    //
     CoordinateMapKey *p_out_map_key,                   //
     gpu_manager_type<default_types::dcoordinate_type, detail::default_allocator>
@@ -259,6 +269,7 @@ ConvolutionTransposeForwardGPU<default_types::dcoordinate_type,
     RegionType::Type const region_type,                //
     at::Tensor const &offset,                          //
     bool generate_new_coordinates,                     //
+    ConvolutionMode::Type const convolution_mode,      //
     CoordinateMapKey *p_in_map_key,                    //
     CoordinateMapKey *p_out_map_key,                   //
     gpu_manager_type<default_types::dcoordinate_type, detail::c10_allocator>
@@ -277,6 +288,7 @@ ConvolutionTransposeBackwardGPU<default_types::dcoordinate_type,
     default_types::stride_type const &kernel_dilation, //
     RegionType::Type const region_type,                //
     at::Tensor const &offset,                          //
+    ConvolutionMode::Type const convolution_mode,      //
     CoordinateMapKey *p_in_map_key,                    //
     CoordinateMapKey *p_out_map_key,                   //
     gpu_manager_type<default_types::dcoordinate_type, detail::default_allocator>
@@ -294,6 +306,7 @@ ConvolutionTransposeBackwardGPU<default_types::dcoordinate_type,
     default_types::stride_type const &kernel_dilation, //
     RegionType::Type const region_type,                //
     at::Tensor const &offset,                          //
+    ConvolutionMode::Type const convolution_mode,      //
     CoordinateMapKey *p_in_map_key,                    //
     CoordinateMapKey *p_out_map_key,                   //
     gpu_manager_type<default_types::dcoordinate_type, detail::c10_allocator>

@@ -25,55 +25,38 @@
 import torch
 import unittest
 
-from MinkowskiEngine import (
-    SparseTensor,
-    MinkowskiInstanceNorm,
-    MinkowskiInstanceNormFunction,
-)
+from MinkowskiEngine import spmm, MinkowskiSPMMFunction
 from utils.gradcheck import gradcheck
 
-from tests.python.common import data_loader
 
+class TestSPMM(unittest.TestCase):
 
-class TestNormalization(unittest.TestCase):
-    def test_inst_norm(self):
-        in_channels = 2
-        coords, feats, labels = data_loader(in_channels)
-        feats = feats.double()
-        input = SparseTensor(feats, coords)
-        input.F.requires_grad_()
-        norm = MinkowskiInstanceNorm(num_features=in_channels).double()
-
-        out = norm(input)
+    def test(self):
+        rows = torch.Tensor([0, 0, 1, 1]).int()
+        cols = torch.Tensor([0, 1, 2, 3]).int()
+        vals = torch.ones(4).double()
+        size = [2, 4]
+        mat = torch.rand(4, 3).double()
+        mat.requires_grad_()
+        spmm_fn = MinkowskiSPMMFunction()
+        out = spmm_fn.apply(rows, cols, vals, size, mat)
         print(out)
 
-        fn = MinkowskiInstanceNormFunction()
-        self.assertTrue(
-            gradcheck(
-                fn, (input.F, input.coordinate_map_key, None, input.coordinate_manager)
-            )
-        )
+        loss = out.sum()
+        loss.backward()
+        print(mat.grad)
+        self.assertTrue(gradcheck(spmm_fn, (rows, cols, vals, size, mat)))
 
-    def test_inst_norm_gpu(self):
-        in_channels = 2
-        coords, feats, labels = data_loader(in_channels)
-        feats = feats.double()
-
-        device = torch.device("cuda")
-        input = SparseTensor(feats, coords, device=device)
-        input.F.requires_grad_()
-        norm = MinkowskiInstanceNorm(num_features=in_channels).to(device).double()
-
-        out = norm(input)
+        rows = rows.cuda()
+        cols = cols.cuda()
+        vals = vals.cuda()
+        mat = mat.cuda()
+        mat.requires_grad_()
+        spmm_fn = MinkowskiSPMMFunction()
+        out = spmm_fn.apply(rows, cols, vals, size, mat)
         print(out)
 
-        fn = MinkowskiInstanceNormFunction()
-        self.assertTrue(
-            gradcheck(
-                fn, (input.F, input.coordinate_map_key, None, input.coordinate_manager)
-            )
-        )
-
-
-if __name__ == "__main__":
-    unittest.main()
+        loss = out.sum()
+        loss.backward()
+        print(mat.grad)
+        self.assertTrue(gradcheck(spmm_fn, (rows, cols, vals, size, mat)))

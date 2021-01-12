@@ -28,9 +28,165 @@
 #include "coordinate_map.hpp"
 #include "kernel_map.hpp"
 #include "kernel_region.hpp"
+#include <numeric>
 #include <omp.h>
+#include <torch/extension.h>
 
 namespace minkowski {
+
+namespace detail {
+
+template <typename coordinate_type,
+          typename stride_type = default_types::stride_type>
+bool is_coordinate_aligned(coordinate<coordinate_type> const &point,
+                           stride_type const &stride) {
+  for (uint32_t i = 0; i < stride.size(); ++i) {
+    if (point[i + 1] % stride[i] != 0)
+      return false;
+  }
+  return true;
+}
+
+template <typename coordinate_type, typename Dtype, typename MapType>
+std::vector<at::Tensor> interpolation_map_weight_kernel(
+    uint32_t const num_tfield,      //
+    uint32_t const coordinate_size, //
+    Dtype const *const p_tfield,    //
+    MapType const &in_map,          //
+    default_types::stride_type const &tensor_stride) {
+  constexpr bool is_float32 = std::is_same<Dtype, float>::value;
+  at::ScalarType const float_type =
+      is_float32 ? at::ScalarType::Float : at::ScalarType::Double;
+  uint32_t const neighbor_volume = std::pow(2, (coordinate_size - 1));
+  LOG_DEBUG("neighbor_volume :", neighbor_volume, "num_tfield:", num_tfield);
+
+  cpu_in_maps in_maps =
+      initialize_maps<cpu_in_map>(neighbor_volume, num_tfield);
+  cpu_out_maps out_maps =
+      initialize_maps<cpu_out_map>(neighbor_volume, num_tfield);
+
+  std::vector<std::vector<Dtype>> weights =
+      initialize_maps<std::vector<Dtype>>(neighbor_volume, num_tfield);
+
+  std::vector<uint32_t> num_used(neighbor_volume);
+  std::for_each(num_used.begin(), num_used.end(), [](auto &i) { i = 0; });
+
+  // OMP
+  // size_t stride = max((size_t)100, numElements / (2 *
+  // omp_get_max_threads())); size_t N = (numElements + stride - 1) /
+  // stride;
+
+  // compute the chunk size per thread.
+  // There's a trade-off between the thread initialization overhead and
+  // the job sizes. If some jobs finish earlier than others due to
+  // imbalance in hash distribution, these threads will be idle.
+  const size_t N = 2 * omp_get_max_threads();
+  const size_t stride = (num_tfield + N - 1) / N;
+  LOG_DEBUG("kernel map with", N, "chunks and", stride, "stride.");
+
+#pragma omp parallel for
+  for (uint32_t n = 0; n < N; n++) {
+    // temporary variables for each thread
+    std::vector<coordinate_type> curr_vec(coordinate_size), lb(coordinate_size),
+        ub(coordinate_size);
+    coordinate<coordinate_type> curr_coordinate(curr_vec.data());
+    uint32_t curr_index_begin;
+
+    for (auto i = stride * n;
+         i < std::min((n + 1) * stride, uint64_t(num_tfield)); ++i) {
+
+      // batch index
+      curr_vec[0] = std::lroundf(p_tfield[i * coordinate_size]);
+      for (uint32_t j = 1; j < coordinate_size; ++j) {
+        auto const curr_tensor_stride = tensor_stride[j - 1];
+        lb[j] =
+            curr_tensor_stride *
+            std::floor(p_tfield[coordinate_size * i + j] / curr_tensor_stride);
+        ub[j] = lb[j] + curr_tensor_stride;
+        curr_vec[j] = lb[j];
+      }
+
+      // For elements in the current region
+      for (uint32_t neighbor_ind = 0; neighbor_ind < neighbor_volume;
+           ++neighbor_ind) {
+
+        uint32_t mask = 1;
+        for (uint32_t j = coordinate_size - 1; j > 0; --j) {
+          if ((neighbor_ind & mask) == 0)
+            curr_vec[j] = lb[j];
+          else
+            curr_vec[j] = ub[j];
+          mask = mask << 1;
+        }
+
+        const auto iter_in = in_map.find(curr_coordinate);
+        // LOG_DEBUG(kernel_ind, ":",
+        //           PtrToString(iter_out->first.data(),
+        //           coordinate_size),
+        //           "->", PtrToString(point.data(),
+        //           coordinate_size));
+        if (iter_in != in_map.end()) {
+#pragma omp atomic capture
+          {
+            curr_index_begin = num_used[neighbor_ind];
+            num_used[neighbor_ind] += 1;
+          }
+          // Compute weights
+          Dtype weight = 1.0;
+          for (uint32_t j = 1; j < coordinate_size; ++j) {
+            weight *=
+                1 - std::abs(p_tfield[coordinate_size * i + j] - curr_vec[j]) /
+                        tensor_stride[j - 1];
+          }
+
+          // Ensure that in_maps and out_maps are resized accordingly
+          in_maps[neighbor_ind][curr_index_begin] = iter_in->second;
+          out_maps[neighbor_ind][curr_index_begin] = i;
+          weights[neighbor_ind][curr_index_begin] = weight;
+          // LOG_DEBUG(kernel_ind, ":",
+          //           PtrToString(iter_in->first.data(),
+          //           coordinate_size),
+          //           "->",
+          //           PtrToString(iter_out->first.data(),
+          //           coordinate_size));
+        }
+      }
+    }
+  }
+
+  auto const total_num_used =
+      std::accumulate(num_used.begin(), num_used.end(), 0);
+
+  auto final_in_map = torch::empty(
+      {total_num_used},
+      torch::TensorOptions().dtype(torch::kInt32).requires_grad(false));
+  auto final_out_map = torch::empty(
+      {total_num_used},
+      torch::TensorOptions().dtype(torch::kInt32).requires_grad(false));
+  auto final_weights = torch::empty(
+      {total_num_used},
+      torch::TensorOptions().dtype(float_type).requires_grad(false));
+
+  uint32_t final_begin = 0;
+  for (uint32_t i = 0; i < neighbor_volume; ++i) {
+    uint32_t const max_num = num_used[i];
+    LOG_DEBUG("kernel index", i, "size:", max_num);
+
+    std::copy_n(in_maps[i].data(), max_num,
+                &final_in_map.template data_ptr<int>()[final_begin]);
+    std::copy_n(out_maps[i].data(), max_num,
+                &final_out_map.template data_ptr<int>()[final_begin]);
+    std::copy_n(weights[i].data(), max_num,
+                final_weights.template data_ptr<Dtype>() + final_begin);
+
+    final_begin += max_num;
+  }
+  std::vector<at::Tensor> return_list = {final_in_map, final_out_map,
+                                         final_weights};
+  return return_list;
+}
+
+} // namespace detail
 
 template <typename coordinate_type,
           template <typename T> class TemplatedAllocator = std::allocator>
@@ -260,20 +416,36 @@ public:
                          out_tensor_stride, base_type::m_byte_allocator);
 
     auto ckernel = cpu_kernel_region<coordinate_type>(kernel);
-    std::vector<coordinate_type> lb(m_coordinate_size), ub(m_coordinate_size),
-        tmp(m_coordinate_size);
+    std::vector<coordinate_type> tmp(m_coordinate_size);
+    coordinate<coordinate_type> point(tmp.data());
 
     index_type num_used{0};
-    for (auto iter_in = m_map.begin(); iter_in != m_map.end(); ++iter_in) {
+    if (kernel.is_transpose()) {
+      for (auto iter_in = m_map.begin(); iter_in != m_map.end(); ++iter_in) {
 
-      // set the bounds for the current region
-      ckernel.set_bounds(iter_in->first.data(), lb.data(), ub.data(),
-                         tmp.data());
-
-      // For elements in the current region
-      for (const auto &point : ckernel) {
-        auto const result = stride_map.insert(point, num_used);
-        num_used += result.second;
+        // For elements in the current region
+        for (uint32_t kernel_ind = 0; kernel_ind < ckernel.volume();
+             ++kernel_ind) {
+          ckernel.coordinate_at(kernel_ind, iter_in->first.data(), tmp.data());
+          auto const result = stride_map.insert(point, num_used);
+          num_used += result.second;
+        }
+      }
+    } else {
+      LOG_DEBUG("stride_region with no transpose");
+      // Expand coordinates with regular conv
+      for (auto iter_in = m_map.begin(); iter_in != m_map.end(); ++iter_in) {
+        // For elements in the current region
+        for (uint32_t kernel_ind = 0; kernel_ind < ckernel.volume();
+             ++kernel_ind) {
+          // TODO replace with more efficient code
+          ckernel.coordinate_at(kernel_ind, iter_in->first.data(), tmp.data());
+          if (detail::is_coordinate_aligned<coordinate_type, stride_type>(
+                  point, out_tensor_stride)) {
+            auto const result = stride_map.insert(point, num_used);
+            num_used += result.second;
+          }
+        }
       }
     }
     return stride_map;
@@ -326,6 +498,34 @@ public:
     }
     LOG_DEBUG("size:", pruned_map.size(), "capacity:", pruned_map.capacity());
     return pruned_map;
+  }
+
+  self_type merge(const self_type &other) const {
+    std::vector<std::reference_wrapper<self_type>> maps{*this, other};
+    // maps.push_back(*this);
+    // maps.push_back(other);
+    return merge(maps);
+  }
+
+  self_type
+  merge(const std::vector<std::reference_wrapper<self_type>> &maps) const {
+    // merge all input maps
+    size_t all_size = std::accumulate(
+        maps.begin(), maps.end(), 0,
+        [](size_t sum, const self_type &map) { return sum + map.size(); });
+    self_type merged_map(all_size, m_coordinate_size,
+                         base_type::m_tensor_stride,
+                         base_type::m_byte_allocator);
+    // Push all coordinates
+    index_type c = 0;
+    for (self_type const &map : maps) {
+      for (auto const &kv : map.m_map) {
+        auto result = merged_map.insert(kv.first, c);
+        c += result.second;
+      }
+    }
+
+    return merged_map;
   }
 
   /*****************************************************************************
@@ -384,24 +584,22 @@ public:
       for (index_type n = 0; n < N; n++) {
         auto ckernel = cpu_kernel_region<coordinate_type>(kernel);
         // temporary variables for each thread
-        std::vector<coordinate_type> lb(m_coordinate_size),
-            ub(m_coordinate_size), tmp(m_coordinate_size);
+        std::vector<coordinate_type> tmp(m_coordinate_size);
+        coordinate<coordinate_type> curr_kernel_coordinate(tmp.data());
 
-        index_type kernel_ind, curr_index_begin;
+        index_type curr_index_begin;
         for (auto iter_out = out_mmap.begin(stride * n);
              iter_out.num_steps() <
              std::min(stride, out_map_num_elements - n * stride);
              ++iter_out) {
 
-          // set the bounds for the current region
-          ckernel.set_bounds(iter_out->first.data(), lb.data(), ub.data(),
-                             tmp.data());
-
           // For elements in the current region
-          kernel_ind = 0;
-          for (const auto &point : ckernel) {
+          for (uint32_t kernel_ind = 0; kernel_ind < ckernel.volume();
+               ++kernel_ind) {
             // If the input coord exists
-            const auto iter_in = m_map.find(point);
+            ckernel.coordinate_at(kernel_ind, iter_out->first.data(),
+                                  tmp.data());
+            const auto iter_in = m_map.find(curr_kernel_coordinate);
             // LOG_DEBUG(kernel_ind, ":",
             //           PtrToString(iter_out->first.data(), m_coordinate_size),
             //           "->", PtrToString(point.data(), m_coordinate_size));
@@ -421,8 +619,6 @@ public:
               //           PtrToString(iter_out->first.data(),
               //           m_coordinate_size));
             }
-            // Post processings
-            kernel_ind++;
           }
         }
       }
@@ -510,9 +706,9 @@ public:
     // There's a trade-off between the thread initialization overhead and the
     // job sizes. If some jobs finish earlier than others due to imbalance in
     // hash distribution, these threads will be idle.
-    const size_t in_map_num_elements = m_map.capacity();
+    size_t const in_map_num_elements = m_map.capacity();
     size_t N = 2 * omp_get_max_threads();
-    const size_t stride = (in_map_num_elements + N - 1) / N;
+    size_t const stride = (in_map_num_elements + N - 1) / N;
     N = (in_map_num_elements + stride - 1) / stride;
     LOG_DEBUG("kernel map with", N, "chunks.");
 
@@ -548,6 +744,84 @@ public:
     // Decomposed kernel map
     auto batch_indices = origin_coordinate_map.batch_indices();
     return cpu_kernel_map(in_out, batch_indices);
+  }
+
+  /*****************************************************************************
+   * Interpolation
+   ****************************************************************************/
+
+  /*
+   * Given a continuous tensor field, return the weights and associated kernel
+   * map
+   */
+  std::vector<at::Tensor>
+  interpolation_map_weight(at::Tensor const &tfield) const {
+    // Over estimate the reserve size to be size();
+    ASSERT(tfield.dim() == 2, "Invalid tfield dimension");
+    ASSERT(tfield.size(1) == m_coordinate_size, "Invalid tfield size");
+
+    // AT_DISPATCH_FLOATING_TYPES(
+    //     tfield.scalar_type(), "interpolation_map_weight_kernel", [&] {
+    switch (tfield.scalar_type()) {
+    case at::ScalarType::Double:
+      return detail::interpolation_map_weight_kernel<coordinate_type, double,
+                                                     map_type>(
+          tfield.size(0),                     //
+          m_coordinate_size,                  //
+          tfield.template data_ptr<double>(), //
+          m_map,                              //
+          base_type::m_tensor_stride);
+    case at::ScalarType::Float:
+      return detail::interpolation_map_weight_kernel<coordinate_type, float,
+                                                     map_type>(
+          tfield.size(0),                    //
+          m_coordinate_size,                 //
+          tfield.template data_ptr<float>(), //
+          m_map,                             //
+          base_type::m_tensor_stride);
+    default:
+      ASSERT(false, "Unsupported float type");
+    }
+  }
+
+  /*****************************************************************************
+   * Union Map
+   ****************************************************************************/
+
+  /*
+   * Find mapping from all inputs to self. The mapping is a list of 2xN tensors
+   */
+  std::vector<at::Tensor> union_map(
+      std::vector<std::reference_wrapper<self_type>> const &in_maps) const {
+    std::vector<at::Tensor> in_out_maps;
+
+    for (self_type const &in_map : in_maps) {
+      size_type const N = in_map.size();
+      size_type const capacity = in_map.m_map.capacity();
+      auto curr_map = torch::empty(
+          {2, N},
+          torch::TensorOptions().dtype(torch::kInt64).requires_grad(false));
+      int64_t *p_in_rows = curr_map.template data_ptr<int64_t>();
+      std::fill_n(p_in_rows, 2 * N, -1);
+      int64_t *p_union_rows = p_in_rows + N;
+
+      index_type offset{0};
+      for (auto iter_in = in_map.m_map.begin(); iter_in.num_steps() < capacity;
+           ++iter_in) {
+        p_in_rows[offset] = iter_in->second;
+        // WARNING: This assumes that the union map has a corresponding
+        // coordinate for speed. This will results in an unexpected behavior
+        // if the union map does not contain the coordinate.
+        p_union_rows[offset] = find(iter_in->first)->second;
+        LOG_DEBUG("offset:", offset, " in:", p_in_rows[offset],
+                  " out:", p_union_rows[offset]);
+        offset++;
+      }
+
+      in_out_maps.push_back(std::move(curr_map));
+    }
+
+    return in_out_maps;
   }
 
   inline size_type size() const noexcept { return m_map.size(); }

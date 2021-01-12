@@ -82,7 +82,7 @@ public:
       auto const &offset_map = m_kernel_map.m_kernel_offset_map;
       auto const iter = offset_map.find(kernel_index);
       if (iter == offset_map.end()) {
-        LOG_WARN("gpu_kernel_map for kernel", kernel_index, "not found.");
+        // LOG_WARN("gpu_kernel_map for kernel", kernel_index, "not found.");
         return m_data;
       } else {
         return m_data + iter->second;
@@ -94,7 +94,7 @@ public:
       auto const &offset_map = m_kernel_map.m_kernel_offset_map;
       auto const iter = offset_map.find(kernel_index);
       if (iter == offset_map.end()) {
-        LOG_WARN("gpu_kernel_map for kernel", kernel_index, "not found.");
+        // LOG_WARN("gpu_kernel_map for kernel", kernel_index, "not found.");
         return m_data + m_kernel_map.m_capacity;
       } else {
         return m_data + iter->second +
@@ -259,6 +259,8 @@ public:
     }
     return nmap;
   }
+
+  size_type volume() const { return m_kernel_size_map.size(); }
 
   size_type max_size() const {
     size_type nmap = 0;

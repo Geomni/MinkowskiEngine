@@ -22,7 +22,7 @@
 # Please cite "4D Spatio-Temporal ConvNets: Minkowski Convolutional Neural
 # Networks", CVPR'19 (https://arxiv.org/abs/1904.08755) if you use any part
 # of the code.
-__version__ = "0.5.0b"
+__version__ = "0.5.0c"
 
 import os
 import sys
@@ -55,6 +55,7 @@ from MinkowskiEngineBackend._C import (
     CoordinateMapType,
     RegionType,
     PoolingMode,
+    BroadcastMode,
     is_cuda_available,
     cuda_version,
     get_gpu_memory_info,
@@ -72,7 +73,7 @@ from MinkowskiTensor import (
     SparseTensorQuantizationMode,
     set_sparse_tensor_operation_mode,
     sparse_tensor_operation_mode,
-    clear_global_coordinate_mananager,
+    clear_global_coordinate_manager,
 )
 
 from MinkowskiSparseTensor import SparseTensor
@@ -82,7 +83,6 @@ from MinkowskiTensorField import TensorField
 from MinkowskiCommon import (
     convert_to_int_tensor,
     MinkowskiModuleBase,
-    GlobalPoolingMode,
 )
 
 from MinkowskiCoordinateManager import (
@@ -108,8 +108,8 @@ from MinkowskiPooling import (
     MinkowskiSumPooling,
     MinkowskiAvgPooling,
     MinkowskiMaxPooling,
-    MinkowskiPoolingTransposeFunction,
-    MinkowskiPoolingTranspose,
+    # MinkowskiPoolingTransposeFunction,
+    # MinkowskiPoolingTranspose,
     MinkowskiGlobalPoolingFunction,
     MinkowskiGlobalPooling,
     MinkowskiGlobalSumPooling,
@@ -117,10 +117,14 @@ from MinkowskiPooling import (
     MinkowskiGlobalMaxPooling,
 )
 
-# from MinkowskiBroadcast import MinkowskiBroadcastFunction, \
-#     MinkowskiBroadcast, MinkowskiBroadcastConcatenation, \
-#     MinkowskiBroadcastAddition, MinkowskiBroadcastMultiplication, OperationType
-#
+from MinkowskiBroadcast import (
+    MinkowskiBroadcastFunction,
+    MinkowskiBroadcastAddition,
+    MinkowskiBroadcastMultiplication,
+    MinkowskiBroadcast,
+    MinkowskiBroadcastConcatenation,
+)
+
 from MinkowskiNonlinearity import (
     MinkowskiReLU,
     MinkowskiSigmoid,
@@ -129,24 +133,28 @@ from MinkowskiNonlinearity import (
     MinkowskiELU,
     MinkowskiSELU,
     MinkowskiCELU,
+    MinkowskiGELU,
     MinkowskiDropout,
     MinkowskiThreshold,
     MinkowskiTanh,
+    MinkowskiSinusoidal,
 )
 
 from MinkowskiNormalization import (
     MinkowskiBatchNorm,
     MinkowskiSyncBatchNorm,
-    # MinkowskiInstanceNorm,
-    # MinkowskiInstanceNormFunction,
-    # MinkowskiStableInstanceNorm,
+    MinkowskiInstanceNorm,
+    MinkowskiInstanceNormFunction,
+    MinkowskiStableInstanceNorm,
 )
 
 
 from MinkowskiPruning import MinkowskiPruning, MinkowskiPruningFunction
 
-# from MinkowskiUnion import MinkowskiUnion, MinkowskiUnionFunction
-#
+from MinkowskiUnion import MinkowskiUnion, MinkowskiUnionFunction
+
+from MinkowskiInterpolation import MinkowskiInterpolation, MinkowskiInterpolationFunction
+
 from MinkowskiNetwork import MinkowskiNetwork
 
 import MinkowskiOps
@@ -165,3 +173,5 @@ import MinkowskiFunctional
 import MinkowskiEngine.utils as utils
 
 import MinkowskiEngine.modules as modules
+
+from sparse_matrix_functions import spmm, MinkowskiSPMMFunction

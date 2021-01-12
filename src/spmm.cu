@@ -24,9 +24,8 @@
  * Networks", CVPR'19 (https://arxiv.org/abs/1904.08755) if you use any part
  * of the code.
  */
-#include "allocators.cuh"
 #include "gpu.cuh"
-#include "math_functions.hpp"
+#include "math_functions.cuh"
 
 #include <cusparse.h>
 
@@ -34,6 +33,7 @@
 #include <ATen/cuda/CUDAUtils.h>
 #include <c10/cuda/CUDACachingAllocator.h>
 #include <torch/extension.h>
+#include <torch/script.h>
 
 namespace minkowski {
 
@@ -154,30 +154,17 @@ torch::Tensor coo_spmm(torch::Tensor const &rows, torch::Tensor const &cols,
   // Create tensors to view just the current set of matrices
   int64_t const nnz = rows.numel();
 
+  if (nnz == 0) {
+    result.transpose_(0, 1);
+    result.zero_();
+    return result;
+  }
+
   cudaDataType cuda_data_type = getTensorCudaDataType(mat2_contig);
   th_int_type *row_indices_ptr =
       reinterpret_cast<th_int_type *>(rows.data_ptr());
   th_int_type *col_indices_ptr =
       reinterpret_cast<th_int_type *>(cols.data_ptr());
-
-  th_int_type *sorted_row_ptr =
-      (th_int_type *)c10::cuda::CUDACachingAllocator::raw_alloc(
-          2 * (nnz + 1) * sizeof(th_int_type));
-  th_int_type *sorted_col_ptr = sorted_row_ptr + nnz + 1;
-
-  // Copy the indices
-  CUDA_CHECK(cudaMemcpy(sorted_row_ptr, row_indices_ptr,
-                        nnz * sizeof(th_int_type), cudaMemcpyDeviceToDevice));
-  CUDA_CHECK(cudaMemcpy(sorted_col_ptr, col_indices_ptr,
-                        nnz * sizeof(th_int_type), cudaMemcpyDeviceToDevice));
-
-  // allocator
-  auto allocator = detail::c10_allocator<char>();
-  sort_coo_gpu(cusparse_handle, dim_i, dim_j, nnz, sorted_row_ptr,
-               sorted_col_ptr, allocator);
-
-  size_t workspace_buffer_size = 0;
-  void *workspace_buffer = nullptr;
 
   // Iterate through each set of 2D matrices within the 3D
   // tensor inputs, performing a matrix multiply with each
@@ -189,16 +176,50 @@ torch::Tensor coo_spmm(torch::Tensor const &rows, torch::Tensor const &cols,
     scalar_t *mat2_ptr = reinterpret_cast<scalar_t *>(mat2_contig.data_ptr());
     scalar_t *result_ptr = reinterpret_cast<scalar_t *>(result.data_ptr());
 
+    //////////////////////////////////////
+    // Sort the sparse matrix COO
+    th_int_type *sorted_row_ptr =
+        (th_int_type *)c10::cuda::CUDACachingAllocator::raw_alloc(
+            2 * (nnz + 1) * sizeof(th_int_type));
+    th_int_type *sorted_col_ptr = sorted_row_ptr + nnz + 1;
+    scalar_t *sorted_val_ptr =
+        (scalar_t *)c10::cuda::CUDACachingAllocator::raw_alloc(
+            nnz * sizeof(scalar_t));
+    LOG_DEBUG("Allocated sorted row col val", nnz);
+
+    // Copy the indices
+    CUDA_CHECK(cudaMemcpy(sorted_row_ptr, row_indices_ptr,
+                          nnz * sizeof(th_int_type), cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpy(sorted_col_ptr, col_indices_ptr,
+                          nnz * sizeof(th_int_type), cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpy(sorted_val_ptr, values_ptr, nnz * sizeof(scalar_t),
+                          cudaMemcpyDeviceToDevice));
+
+    thrust::sort_by_key(thrust::device,            //
+                        sorted_row_ptr,            // key begin
+                        sorted_row_ptr + nnz,      // key end
+                        thrust::make_zip_iterator( // value begin
+                            thrust::make_tuple(    //
+                                sorted_col_ptr,    //
+                                sorted_val_ptr     //
+                                )                  //
+                            ));
+    LOG_DEBUG("Sorted row");
+    //////////////////////////////////////
+
+    size_t workspace_buffer_size = 0;
+    void *workspace_buffer = nullptr;
+
     cusparseSpMatDescr_t sparse_descr;
-    CUSPARSE_CHECK(cusparseCreateCoo(&sparse_descr,     //
-                                     dim_i, dim_j, nnz, //
-                                     reinterpret_cast<void *>(sorted_row_ptr),
-                                     reinterpret_cast<void *>(sorted_col_ptr),
-                                     reinterpret_cast<void *>(values_ptr), //
-                                     std::is_same<th_int_type, int32_t>::value
-                                         ? CUSPARSE_INDEX_32I
-                                         : CUSPARSE_INDEX_64I,
-                                     CUSPARSE_INDEX_BASE_ZERO, cuda_data_type));
+    CUSPARSE_CHECK(cusparseCreateCoo(
+        &sparse_descr,     //
+        dim_i, dim_j, nnz, //
+        reinterpret_cast<void *>(sorted_row_ptr),
+        reinterpret_cast<void *>(sorted_col_ptr),
+        reinterpret_cast<void *>(sorted_val_ptr), //
+        std::is_same<th_int_type, int32_t>::value ? CUSPARSE_INDEX_32I
+                                                  : CUSPARSE_INDEX_64I,
+        CUSPARSE_INDEX_BASE_ZERO, cuda_data_type));
 
     cusparseDnMatDescr_t dense_descr;
     CUSPARSE_CHECK(cusparseCreateDnMat(&dense_descr,                       //
@@ -218,14 +239,17 @@ torch::Tensor coo_spmm(torch::Tensor const &rows, torch::Tensor const &cols,
         CUSPARSE_OPERATION_TRANSPOSE, (void *)&alpha_val, sparse_descr,
         dense_descr, (void *)&beta_val, result_descr, cuda_data_type, mm_alg,
         &required_workspace_buffer_size));
+    LOG_DEBUG("Buffer size:", required_workspace_buffer_size);
 
     if (required_workspace_buffer_size > workspace_buffer_size) {
       if (workspace_buffer != nullptr) {
         cudaFree(workspace_buffer);
       }
       workspace_buffer_size = required_workspace_buffer_size;
+      LOG_DEBUG("cudaMallocManaged");
       cudaMallocManaged(&workspace_buffer, workspace_buffer_size);
     }
+    LOG_DEBUG("SPMM");
     CUSPARSE_CHECK(cusparseSpMM(cusparse_handle,                  //
                                 CUSPARSE_OPERATION_NON_TRANSPOSE, //
                                 CUSPARSE_OPERATION_TRANSPOSE,     //
@@ -236,17 +260,20 @@ torch::Tensor coo_spmm(torch::Tensor const &rows, torch::Tensor const &cols,
     CUSPARSE_CHECK(cusparseDestroySpMat(sparse_descr));
     CUSPARSE_CHECK(cusparseDestroyDnMat(dense_descr));
     CUSPARSE_CHECK(cusparseDestroyDnMat(result_descr));
+
+    LOG_DEBUG("Dealloc");
+    c10::cuda::CUDACachingAllocator::raw_delete((void *)sorted_row_ptr);
+    c10::cuda::CUDACachingAllocator::raw_delete((void *)sorted_val_ptr);
+
+    if (workspace_buffer != nullptr) {
+      cudaFree(workspace_buffer);
+    }
   });
 
   // Need to transpose the result matrices since cusparse stores
   // them in column-major order in memory
   result.transpose_(0, 1);
 
-  if (workspace_buffer != nullptr) {
-    cudaFree(workspace_buffer);
-  }
-
-  c10::cuda::CUDACachingAllocator::raw_delete((void *)sorted_row_ptr);
   CUDA_CHECK(cudaGetLastError());
 
   return result;

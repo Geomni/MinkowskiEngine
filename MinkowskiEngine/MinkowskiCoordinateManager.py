@@ -36,6 +36,7 @@ from MinkowskiEngineBackend._C import (
     GPUMemoryAllocatorType,
     CoordinateMapType,
     MinkowskiAlgorithm,
+    RegionType,
 )
 
 CPU_COUNT = os.cpu_count()
@@ -53,7 +54,7 @@ def set_coordinate_map_type(coordinate_map_type: CoordinateMapType):
     r"""Set the default coordinate map type.
 
     The MinkowskiEngine automatically set the coordinate_map_type to CUDA if
-    a NVIDIA GPU is available. To control the 
+    a NVIDIA GPU is available. To control the
     """
     global _coordinate_map_type
     _coordinate_map_type = coordinate_map_type
@@ -89,8 +90,7 @@ def set_gpu_allocator(backend: GPUMemoryAllocatorType):
 
 
 def set_memory_manager_backend(backend: GPUMemoryAllocatorType):
-    r"""Alias for set_gpu_allocator. Deprecated and will be removed.
-    """
+    r"""Alias for set_gpu_allocator. Deprecated and will be removed."""
     warnings.warn(
         "`set_memory_manager_backend` has been deprecated. Use `set_gpu_allocator` instead."
     )
@@ -149,10 +149,10 @@ class CoordinateManager:
     def insert_and_map(
         self,
         coordinates: torch.Tensor,
-        tensor_stride: Union[int, Sequence, np.ndarray],
+        tensor_stride: Union[int, Sequence, np.ndarray] = 1,
         string_id: str = "",
     ) -> Tuple[CoordinateMapKey, Tuple[torch.IntTensor, torch.IntTensor]]:
-        r"""create a new coordinate map and returns 
+        r"""create a new coordinate map and returns (key, (map, inverse_map)).
 
         :attr:`coordinates`: `torch.Tensor` (Int tensor. `CUDA` if
         coordinate_map_type == `CoordinateMapType.GPU`) that defines the
@@ -168,6 +168,7 @@ class CoordinateManager:
            >>> torch.all(coordinates == coordinates[unique_map][inverse_map]) # True
 
         """
+        tensor_stride = convert_to_int_list(tensor_stride, self.D)
         return self._manager.insert_and_map(coordinates, tensor_stride, string_id)
 
     def insert_field(
@@ -176,7 +177,7 @@ class CoordinateManager:
         tensor_stride: Union[int, Sequence, np.ndarray],
         string_id: str = "",
     ) -> Tuple[CoordinateMapKey, Tuple[torch.IntTensor, torch.IntTensor]]:
-        r"""create a new coordinate map and returns 
+        r"""create a new coordinate map and returns
 
         :attr:`coordinates`: `torch.FloatTensor` (`CUDA` if coordinate_map_type
         == `CoordinateMapType.GPU`) that defines the coordinates.
@@ -197,6 +198,7 @@ class CoordinateManager:
         self,
         coordinate_map_key: CoordinateMapKey,
         stride: Union[int, Sequence, np.ndarray, torch.Tensor],
+        string_id: str = "",
     ) -> CoordinateMapKey:
         r"""Generate a new coordinate map and returns the key.
 
@@ -206,7 +208,7 @@ class CoordinateManager:
         :attr:`stride`: stride size.
         """
         stride = convert_to_int_list(stride, self.D)
-        return self._manager.stride(coordinate_map_key, stride)
+        return self._manager.stride(coordinate_map_key, stride, string_id)
 
     def origin(self):
         return self._manager.origin()
@@ -248,8 +250,7 @@ class CoordinateManager:
     #     return strided_key
 
     def _get_coordinate_map_key(self, key_or_tensor_strides):
-        r"""Helper function that retrieves the first coordinate map key for the given tensor stride.
-        """
+        r"""Helper function that retrieves the first coordinate map key for the given tensor stride."""
         assert isinstance(key_or_tensor_strides, CoordinateMapKey) or isinstance(
             key_or_tensor_strides, (Sequence, np.ndarray, torch.IntTensor, int)
         ), f"The input must be either a CoordinateMapKey or tensor_stride of type (int, list, tuple, array, Tensor). Invalid: {key_or_tensor_strides}"
@@ -273,136 +274,71 @@ class CoordinateManager:
     def number_of_unique_batch_indices(self):
         return self._manager.origin_map_size()
 
-    # def get_batch_indices(self):
-    #     return self.CPPCoordsManager.getBatchIndices()
+    def get_unique_coordinate_map_key(self, tensor_stride: Union[int, list]):
+        """
+        Returns a unique coordinate_map_key for a given tensor stride.
 
-    # def set_origin_coords_key(self, coords_key: CoordsKey):
-    #     self.CPPCoordsManager.setOriginCoordsKey(coords_key.CPPCoordsKey)
+        """
+        return self._manager.get_random_string_id(tensor_stride, "")
 
-    # def get_row_indices_per_batch(self, coords_key, out_coords_key=None):
-    #     r"""Return a list of lists of row indices per batch.
+    def get_kernel_map(
+        self,
+        in_key: CoordinateMapKey,
+        out_key: CoordinateMapKey,
+        stride=1,
+        kernel_size=3,
+        dilation=1,
+        region_type=RegionType.HYPER_CUBE,
+        region_offset=None,
+        is_transpose=False,
+        is_pool=False,
+    ):
+        r"""Get kernel in-out maps for the specified coords keys or tensor strides.
 
-    #     The corresponding batch indices are accessible by `get_batch_indices`.
+        returns dict{kernel_index: in_out_tensor} where in_out_tensor[0] is the input row indices that correspond to in_out_tensor[1], which is the row indices for output.
+        """
+        # region type 1 iteration with kernel_size 1 is invalid
+        if isinstance(kernel_size, torch.Tensor):
+            assert (kernel_size > 0).all(), f"Invalid kernel size: {kernel_size}"
+            if (kernel_size == 1).all() == 1:
+                region_type = RegionType.HYPER_CUBE
+        elif isinstance(kernel_size, int):
+            assert kernel_size > 0, f"Invalid kernel size: {kernel_size}"
+            if kernel_size == 1:
+                region_type = RegionType.HYPER_CUBE
 
-    #     .. code-block:: python
+        in_key = self._get_coordinate_map_key(in_key)
+        out_key = self._get_coordinate_map_key(out_key)
 
-    #        sp_tensor = ME.SparseTensor(features, coords=coordinates)
-    #        row_indices = sp_tensor.coords_man.get_row_indices_per_batch(sp_tensor.coords_key)
+        if region_offset is None:
+            region_offset = torch.IntTensor()
 
-    #     """
-    #     assert isinstance(coords_key, CoordsKey)
-    #     if out_coords_key is None:
-    #         out_coords_key = CoordsKey(self.D)
-    #     return self.CPPCoordsManager.getRowIndicesPerBatch(
-    #         coords_key.CPPCoordsKey, out_coords_key.CPPCoordsKey
-    #     )
+        kernel_map = self._manager.get_kernel_map(
+            in_key,
+            out_key,
+            convert_to_int_list(stride, self.D),  #
+            convert_to_int_list(kernel_size, self.D),  #
+            convert_to_int_list(dilation, self.D),  #
+            region_type,
+            region_offset,
+            is_transpose,
+            is_pool,
+        )
 
-    # def get_row_indices_at(self, coords_key, batch_index):
-    #     r"""Return an torch.LongTensor of row indices for the specified batch index
-
-    #     .. code-block:: python
-
-    #        sp_tensor = ME.SparseTensor(features, coords=coordinates)
-    #        row_indices = sp_tensor.coords_man.get_row_indices_at(sp_tensor.coords_key, batch_index)
-
-    #     """
-    #     assert isinstance(coords_key, CoordsKey)
-    #     out_coords_key = CoordsKey(self.D)
-    #     return self.CPPCoordsManager.getRowIndicesAtBatchIndex(
-    #         coords_key.CPPCoordsKey, out_coords_key.CPPCoordsKey, batch_index
-    #     )
-
-    # def get_kernel_map(
-    #     self,
-    #     in_key_or_tensor_strides,
-    #     out_key_or_tensor_strides,
-    #     stride=1,
-    #     kernel_size=3,
-    #     dilation=1,
-    #     region_type=0,
-    #     region_offset=None,
-    #     is_transpose=False,
-    #     is_pool=False,
-    #     on_gpu=False,
-    # ):
-    #     r"""Get kernel in-out maps for the specified coords keys or tensor strides.
-
-    #     """
-    #     # region type 1 iteration with kernel_size 1 is invalid
-    #     if isinstance(kernel_size, torch.Tensor):
-    #         assert (kernel_size > 0).all(), f"Invalid kernel size: {kernel_size}"
-    #         if (kernel_size == 1).all() == 1:
-    #             region_type = 0
-    #     elif isinstance(kernel_size, int):
-    #         assert kernel_size > 0, f"Invalid kernel size: {kernel_size}"
-    #         if kernel_size == 1:
-    #             region_type = 0
-
-    #     if isinstance(in_key_or_tensor_strides, CoordsKey):
-    #         in_tensor_strides = in_key_or_tensor_strides.getTensorStride()
-    #     else:
-    #         in_tensor_strides = in_key_or_tensor_strides
-    #     if region_offset is None:
-    #         region_offset = torch.IntTensor()
-
-    #     in_coords_key = self._get_coordinate_map_key(in_key_or_tensor_strides)
-    #     out_coords_key = self._get_coordinate_map_key(out_key_or_tensor_strides)
-
-    #     tensor_strides = convert_to_int_tensor(in_tensor_strides, self.D)
-    #     strides = convert_to_int_tensor(stride, self.D)
-    #     kernel_sizes = convert_to_int_tensor(kernel_size, self.D)
-    #     dilations = convert_to_int_tensor(dilation, self.D)
-    #     D = in_coords_key.D
-    #     tensor_strides, strides, kernel_sizes, dilations, region_type = prep_args(
-    #         tensor_strides, strides, kernel_sizes, dilations, region_type, D
-    #     )
-    #     if on_gpu:
-    #         assert hasattr(
-    #             self.CPPCoordsManager, "getKernelMapGPU"
-    #         ), f"Function getKernelMapGPU not available. Please compile MinkowskiEngine where `torch.cuda.is_available()` is `True`."
-    #         kernel_map_fn = getattr(self.CPPCoordsManager, "getKernelMapGPU")
-    #     else:
-    #         kernel_map_fn = self.CPPCoordsManager.getKernelMap
-    #     kernel_map = kernel_map_fn(
-    #         convert_to_int_list(tensor_strides, D),  #
-    #         convert_to_int_list(strides, D),  #
-    #         convert_to_int_list(kernel_sizes, D),  #
-    #         convert_to_int_list(dilations, D),  #
-    #         region_type,
-    #         region_offset,
-    #         in_coords_key.CPPCoordsKey,
-    #         out_coords_key.CPPCoordsKey,
-    #         is_transpose,
-    #         is_pool,
-    #     )
-
-    #     return kernel_map
+        return kernel_map
 
     def origin_map(self, key: CoordinateMapKey):
         return self._manager.origin_map(key)
 
-    # def get_coords_map(self, in_key_or_tensor_strides, out_key_or_tensor_strides):
-    #     r"""Extract input coords indices that maps to output coords indices.
+    def union_map(self, in_keys: list, out_key):
+        return self._manager.union_map(in_keys, out_key)
 
-    #     .. code-block:: python
-
-    #        sp_tensor = ME.SparseTensor(features, coords=coordinates)
-    #        out_sp_tensor = stride_2_conv(sp_tensor)
-
-    #        cm = sp_tensor.coords_man
-    #        # cm = out_sp_tensor.coords_man  # doesn't matter which tensor you pick
-    #        ins, outs = cm.get_coords_map(1,  # in stride
-    #                                      2)  # out stride
-    #        for i, o in zip(ins, outs):
-    #           print(f"{i} -> {o}")
-
-    #     """
-    #     in_coords_key = self._get_coordinate_map_key(in_key_or_tensor_strides)
-    #     out_coords_key = self._get_coordinate_map_key(out_key_or_tensor_strides)
-
-    #     return self.CPPCoordsManager.getCoordsMap(
-    #         in_coords_key.CPPCoordsKey, out_coords_key.CPPCoordsKey
-    #     )
+    def interpolation_map_weight(
+        self,
+        key: CoordinateMapKey,
+        samples: torch.Tensor,
+    ):
+        return self._manager.interpolation_map_weight(samples, key)
 
     # def get_union_map(self, in_keys: List[CoordsKey], out_key: CoordsKey):
     #     r"""Generates a union of coordinate sets and returns the mapping from input sets to the new output coordinates.
@@ -433,15 +369,6 @@ class CoordinateManager:
     #         [key.CPPCoordsKey for key in in_keys], out_key.CPPCoordsKey
     #     )
 
-    # def get_coords_size_by_coords_key(self, coords_key):
-    #     assert isinstance(coords_key, CoordsKey)
-    #     return self.CPPCoordsManager.getCoordsSize(coords_key.CPPCoordsKey)
-
-    # def get_mapping_by_tensor_strides(self, in_tensor_strides, out_tensor_strides):
-    #     in_key = self._get_coordinate_map_key(in_tensor_strides)
-    #     out_key = self._get_coordinate_map_key(out_tensor_strides)
-    #     return self.get_mapping_by_coords_key(in_key, out_key)
-
     # def permute_label(
     #     self, label, max_label, target_tensor_stride, label_tensor_stride=1
     # ):
@@ -463,11 +390,10 @@ class CoordinateManager:
     #     np.add.at(counter, (permutation, label), 1)
     #     return torch.from_numpy(np.argmax(counter, 1))
 
-    # def print_diagnostics(self, coords_key: CoordsKey):
-    #     assert isinstance(coords_key, CoordsKey)
-    #     self.CPPCoordsManager.printDiagnostics(coords_key.CPPCoordsKey)
-
     def __repr__(self):
         return (
-            self._CoordinateManagerClass.__name__ + "(\n" + str(self._manager) + f"\talgorithm={self.minkowski_algorithm}\n  )\n"
+            self._CoordinateManagerClass.__name__
+            + "(\n"
+            + str(self._manager)
+            + f"\talgorithm={self.minkowski_algorithm}\n  )\n"
         )

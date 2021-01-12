@@ -34,7 +34,8 @@ from MinkowskiEngine import (
     is_cuda_available,
 )
 
-from tests.python.common import data_loader, load_file, batched_coordinates
+from MinkowskiEngine.utils import batched_coordinates
+from tests.python.common import data_loader, load_file
 
 
 class SparseTensorTestCase(unittest.TestCase):
@@ -49,6 +50,14 @@ class SparseTensorTestCase(unittest.TestCase):
         feats = torch.FloatTensor(0, 16)
         coords = torch.IntTensor(0, 4)
         input = SparseTensor(feats, coordinates=coords)
+        print(input)
+
+    def test_tensor_stride(self):
+        print(f"{self.__class__.__name__}: test_tensor_stride SparseTensor")
+        feats = torch.FloatTensor(4, 16)
+        coords = torch.IntTensor(4, 4)
+        input = SparseTensor(feats, coordinates=coords, tensor_stride=4)
+        self.assertEqual(input.tensor_stride, [4, 4, 4])
         print(input)
 
     def test_force_creation(self):
@@ -74,7 +83,7 @@ class SparseTensorTestCase(unittest.TestCase):
         st = SparseTensor(feats, coords, device=feats.device)
         print(st)
 
-    def test_duplicate_coords(self):
+    def test_quantization(self):
         print(f"{self.__class__.__name__}: test_duplicate_coords")
         coords, feats, labels = data_loader(nchannel=2)
         # create duplicate coords
@@ -101,6 +110,44 @@ class SparseTensorTestCase(unittest.TestCase):
             features=feats,
             quantization_mode=SparseTensorQuantizationMode.UNWEIGHTED_AVERAGE,
         )
+        self.assertTrue(len(sinput) == 4)
+        self.assertTrue(0.5 in sinput.features)
+        self.assertTrue(2.5 in sinput.features)
+        self.assertTrue(5.5 in sinput.features)
+        self.assertTrue(7 in sinput.features)
+        self.assertTrue(len(sinput.slice(sinput)) == len(coords))
+
+    def test_quantization_gpu(self):
+        print(f"{self.__class__.__name__}: test_duplicate_coords")
+        coords, feats, labels = data_loader(nchannel=2)
+        # create duplicate coords
+        coords[0] = coords[1]
+        coords[2] = coords[3]
+        input = SparseTensor(feats, coordinates=coords)
+        self.assertTrue(len(input) == len(coords) - 2)
+        input = SparseTensor(
+            feats,
+            coordinates=coords,
+            quantization_mode=SparseTensorQuantizationMode.UNWEIGHTED_AVERAGE,
+            device="cuda",
+        )
+        self.assertTrue(len(coords) == 16)
+        self.assertTrue(len(input) == 14)
+        print(input)
+
+        # 1D
+        coords = torch.IntTensor(
+            [[0, 1], [0, 1], [0, 2], [0, 2], [1, 0], [1, 0], [1, 1]]
+        )
+        feats = torch.FloatTensor([[0, 1, 2, 3, 5, 6, 7]]).T
+        # 0.5, 2.5, 5.5, 7
+        sinput = SparseTensor(
+            coordinates=coords,
+            features=feats,
+            quantization_mode=SparseTensorQuantizationMode.UNWEIGHTED_AVERAGE,
+            device="cuda",
+        )
+        print(sinput)
         self.assertTrue(len(sinput) == 4)
         self.assertTrue(0.5 in sinput.features)
         self.assertTrue(2.5 in sinput.features)
@@ -150,11 +197,18 @@ class SparseTensorTestCase(unittest.TestCase):
         self.assertEqual(len(coords[1]), 0)
         self.assertEqual(len(coords[2]), 2)
 
-        # feats, valid_inds = X.features_at_coords(torch.IntTensor([[0, 0], [2, 2], [-1, -1]]))
-        # self.assertTrue(feats[0, 0] == 1.1)
-        # self.assertTrue(feats[1, 0] == 5.1)
-        # self.assertTrue(feats[2, 0] == 0)
-        # self.assertTrue(len(valid_inds) == 2)
+    def test_features_at_coordinates(self):
+        coords = torch.IntTensor([[0, 0], [0, 1], [0, 2], [2, 0], [2, 2]])
+        feats = torch.FloatTensor([[1.1, 2.1, 3.1, 4.1, 5.1]]).t()
+
+        X = SparseTensor(features=feats, coordinates=coords)
+        feats = X.features_at_coordinates(
+            torch.FloatTensor([[0, 0], [0, 1], [0, 2], [2, 2], [0, 0], [0, 0.5]])
+        ).flatten()
+
+        self.assertTrue(feats[0] == 1.1)
+        self.assertTrue(feats[3] == 5.1)
+        self.assertTrue(feats[4] == 1.1)
 
     def test_decomposition(self):
         coords, colors, pcd = load_file("1.ply")

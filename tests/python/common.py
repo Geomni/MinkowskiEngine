@@ -29,45 +29,20 @@ import MinkowskiEngine as ME
 
 from urllib.request import urlretrieve
 
-try:
-    import open3d as o3d
-except ImportError:
-    raise ImportError("Please install open3d with `pip install open3d`.")
-
 if not os.path.isfile("1.ply"):
     urlretrieve("http://cvgl.stanford.edu/data2/minkowskiengine/1.ply", "1.ply")
 
 
 def load_file(file_name):
+    try:
+        import open3d as o3d
+    except ImportError:
+        raise ImportError("Please install open3d with `pip install open3d`.")
+
     pcd = o3d.io.read_point_cloud(file_name)
     coords = np.array(pcd.points)
     colors = np.array(pcd.colors)
     return coords, colors, pcd
-
-
-def batched_coordinates(coords, return_int=True):
-    D = np.unique(np.array([cs.shape[1] for cs in coords]))
-    assert len(D) == 1, f"Dimension of the array mismatch. All dimensions: {D}"
-    D = D[0]
-    N = np.array([len(cs) for cs in coords]).sum()
-    TensorType = torch.IntTensor if return_int else torch.FloatTensor
-    bcoords = TensorType(N, D + 1)  # uninitialized
-
-    s = 0
-    for batch_id, coord in enumerate(coords):
-        if isinstance(coord, np.ndarray):
-            coord = torch.from_numpy(coord)
-        else:
-            assert isinstance(
-                coord, torch.Tensor
-            ), "Coords must be of type numpy.ndarray or torch.Tensor"
-        cn = coord.shape[0]
-        if return_int:
-            coord = coord.int()
-        bcoords[s: s + cn, 1:] = coord
-        bcoords[s: s + cn, 0] = batch_id
-        s += cn
-    return bcoords
 
 
 def get_coords(data):
@@ -79,7 +54,14 @@ def get_coords(data):
     return np.array(coords)
 
 
-def data_loader(nchannel=3, max_label=5, is_classification=True, seed=-1, batch_size=2):
+def data_loader(
+    nchannel=3,
+    max_label=5,
+    is_classification=True,
+    seed=-1,
+    batch_size=2,
+    dtype=torch.float32,
+):
     if seed >= 0:
         torch.manual_seed(seed)
 
@@ -91,6 +73,6 @@ def data_loader(nchannel=3, max_label=5, is_classification=True, seed=-1, batch_
 
     # features and labels
     N = len(coords)
-    feats = torch.randn(N, nchannel)
+    feats = torch.arange(N * nchannel).view(N, nchannel).to(dtype)
     label = (torch.rand(2 if is_classification else N) * max_label).long()
     return coords, feats, label

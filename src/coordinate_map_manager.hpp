@@ -176,12 +176,14 @@ public:
   // returns out_map_key and flag which is true if a new map is created
   std::pair<coordinate_map_key_type, bool>
   stride(coordinate_map_key_type const &in_map_key,
-         stride_type const &kernel_stride);
+         stride_type const &kernel_stride, std::string const string_id = "");
 
   // python-side stride function
   py::object py_stride(CoordinateMapKey const *in_map_key,
-                       stride_type const &kernel_stride) {
-    auto key = std::get<0>(stride(in_map_key->get_key(), kernel_stride));
+                       stride_type const &kernel_stride,
+                       std::string const string_id = "") {
+    auto key =
+        std::get<0>(stride(in_map_key->get_key(), kernel_stride, string_id));
     return py::cast(new CoordinateMapKey(key.first.size() + 1, key));
   }
 
@@ -189,7 +191,8 @@ public:
   std::pair<coordinate_map_key_type, bool>
   stride_region(coordinate_map_key_type const &in_map_key,
                 cpu_kernel_region<coordinate_type> &kernel,
-                bool generate_new_map);
+                stride_type const &out_tensor_stride,
+                bool const expand_coordinates);
 
   // origin coordinate map creation
   std::pair<coordinate_map_key_type, bool> origin();
@@ -205,6 +208,15 @@ public:
     return py::cast(new CoordinateMapKey(map_key_bool.first.first.size() + 1,
                                          map_key_bool.first));
   }
+
+  // Merge
+  coordinate_map_key_type
+  merge(std::vector<coordinate_map_key_type> const &map_keys);
+  std::pair<coordinate_map_key_type, std::vector<at::Tensor>>
+  union_map(std::vector<coordinate_map_key_type> const &map_keys);
+  std::vector<at::Tensor>
+  union_map_th(std::vector<CoordinateMapKey *> const &map_keys,
+               CoordinateMapKey *p_out_key);
 
   /****************************************************************************
    * Tensor field related operations
@@ -278,7 +290,8 @@ public:
          ++it) {
       coordinate_map_key_type const &key = it->first;
       if (key.first == tensor_stride) {
-        keys.push_back(py::cast(new CoordinateMapKey(key.first.size(), key)));
+        keys.push_back(
+            py::cast(new CoordinateMapKey(key.first.size() + 1, key)));
       }
     }
     return keys;
@@ -334,12 +347,42 @@ public:
 
   kernel_map_type const &origin_map(CoordinateMapKey const *py_out_coords_key);
 
+  // return kernel map. for cpu it is {in maps, out maps}.
+  // For gpu it could be {in maps, out maps}, or {kernel index, in map, out map}
+  std::unordered_map<int64_t, at::Tensor>
+  get_kernel_map(CoordinateMapKey const *py_in_coords_key,  //
+                 CoordinateMapKey const *py_out_coords_key, //
+                 stride_type const &kernel_size,            //
+                 stride_type const &kernel_stride,          //
+                 stride_type const &kernel_dilation,        //
+                 RegionType::Type const region_type,        //
+                 at::Tensor const &offsets, bool is_transpose, bool is_pool);
+
+  // interpolation map
+  std::vector<at::Tensor>
+  interpolation_map_weight(at::Tensor const &tfield,
+                           CoordinateMapKey const *py_in_coords_key);
+
   std::pair<at::Tensor, std::vector<at::Tensor>>
   origin_map_th(CoordinateMapKey const *py_out_coords_key);
 
   size_t origin_map_size() {
     auto const key = origin().first;
     return m_coordinate_maps.find(key)->second.size();
+  }
+
+  coordinate_map_key_type get_random_string_id(stride_type const &tensor_stride,
+                                               std::string string_id) {
+    coordinate_map_key_type key = std::make_pair(
+        tensor_stride, string_id.size() > 0 ? string_id + '-' + random_string(5)
+                                            : random_string(5));
+    while (m_coordinate_maps.find(key) != m_coordinate_maps.end()) {
+      key =
+          std::make_pair(tensor_stride, string_id.size() > 0
+                                            ? string_id + '-' + random_string(5)
+                                            : random_string(5));
+    }
+    return key;
   }
 
 private:
@@ -361,20 +404,6 @@ private:
     std::string str(length, 0);
     std::generate_n(str.begin(), length, randchar);
     return str;
-  }
-
-  coordinate_map_key_type get_random_string_id(stride_type const &tensor_stride,
-                                               std::string string_id) {
-    coordinate_map_key_type key = std::make_pair(
-        tensor_stride, string_id.size() > 0 ? string_id + '-' + random_string(5)
-                                            : random_string(5));
-    while (m_coordinate_maps.find(key) != m_coordinate_maps.end()) {
-      key =
-          std::make_pair(tensor_stride, string_id.size() > 0
-                                            ? string_id + '-' + random_string(5)
-                                            : random_string(5));
-    }
-    return key;
   }
 
   kernel_map_key_type
@@ -499,6 +528,18 @@ struct origin_map_functor {
   operator()(CoordinateMapType<coordinate_type, TemplatedAllocator> const
                  &origin_coordinate_map,
              kernel_map_type const &origin_map);
+};
+
+template <typename coordinate_type,
+          template <typename C> class TemplatedAllocator,
+          template <typename T, template <typename Q> class A>
+          class CoordinateMapType,
+          typename kernel_map_type>
+struct kernel_map_to_tensors {
+  using index_type = default_types::index_type;
+
+  std::unordered_map<int64_t, at::Tensor>
+  operator()(kernel_map_type const &kernel_map);
 };
 
 } // namespace detail

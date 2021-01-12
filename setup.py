@@ -53,6 +53,7 @@ try:
 except ImportError:
     raise ImportError("Pytorch not found. Please install pytorch first.")
 
+import warnings
 import codecs
 import os
 import re
@@ -125,6 +126,7 @@ CUDA_HOME, argv = _argparse("--cuda_home", argv, False)
 BLAS, argv = _argparse("--blas", argv, False)
 BLAS_INCLUDE_DIRS, argv = _argparse("--blas_include_dirs", argv, False)
 BLAS_LIBRARY_DIRS, argv = _argparse("--blas_library_dirs", argv, False)
+MAX_COMPILATION_THREADS = 12
 
 Extension = CUDAExtension
 extra_link_args = []
@@ -160,7 +162,10 @@ else:
 if "darwin" in platform:
     CC_FLAGS += ["-stdlib=libc++"]
 
-NVCC_FLAGS += ["--extended-lambda"]
+NVCC_FLAGS += ["--expt-relaxed-constexpr", "--expt-extended-lambda"]
+FAST_MATH, argv = _argparse("--fast_math", argv)
+if FAST_MATH:
+    NVCC_FLAGS.append("--use_fast_math")
 
 BLAS_LIST = ["openblas", "mkl", "atlas", "blas"]
 if not (BLAS is False):  # False only when not set, str otherwise
@@ -204,7 +209,9 @@ SOURCE_SETS = {
             "convolution_transpose_cpu.cpp",
             "local_pooling_cpu.cpp",
             "global_pooling_cpu.cpp",
+            "broadcast_cpu.cpp",
             "pruning_cpu.cpp",
+            "interpolation_cpu.cpp",
             "quantization.cpp",
         ],
         ["pybind/minkowski.cpp"],
@@ -224,7 +231,10 @@ SOURCE_SETS = {
             "pooling_max_kernel.cu",
             "local_pooling_gpu.cu",
             "global_pooling_gpu.cu",
+            "broadcast_kernel.cu",
+            "broadcast_gpu.cu",
             "pruning_gpu.cu",
+            "interpolation_gpu.cu",
             "spmm.cu",
             "gpu.cu",
             "quantization.cpp",
@@ -240,12 +250,17 @@ USE_NINJA = os.getenv("USE_NINJA") == "0"
 HERE = Path(os.path.dirname(__file__)).absolute()
 SRC_PATH = HERE / "src"
 
-# distutils only checks CC not CXX
-try:
-    CC = os.environ["CC"]
+if "CC" in os.environ or "CXX" in os.environ:
+    # distutils only checks CC not CXX
+    if "CXX" in os.environ:
+        os.environ["CC"] = os.environ["CXX"]
+        CC = os.environ["CXX"]
+    else:
+        CC = os.environ["CC"]
     print(f"Using {CC} for c++ compilation")
-    NVCC_FLAGS += [f"-ccbin={CC}"]
-except:
+    if torch.__version__ < "1.7.0":
+        NVCC_FLAGS += [f"-ccbin={CC}"]
+else:
     print("Using the default compiler")
 
 if debug:
@@ -254,6 +269,10 @@ if debug:
 else:
     CC_FLAGS += ["-O3"]
     NVCC_FLAGS += ["-O3"]
+
+if "MAX_JOBS" not in os.environ and os.cpu_count() > MAX_COMPILATION_THREADS:
+    # Clip the num compilation thread to 8
+    os.environ["MAX_JOBS"] = str(MAX_COMPILATION_THREADS)
 
 target = "cpu" if CPU_ONLY else "gpu"
 

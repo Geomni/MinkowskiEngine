@@ -46,7 +46,7 @@ class SparseTensorOperationMode(Enum):
 
     :attr:`SHARE_COORDINATE_MANAGER`: always use the globally defined coordinate
     manager. Must clear the coordinate manager manually by
-    :attr:`MinkowskiEngine.SparseTensor.clear_global_coordinate_mananager`.
+    :attr:`MinkowskiEngine.SparseTensor.clear_global_coordinate_manager`.
 
     """
     SEPARATE_COORDINATE_MANAGER = 0
@@ -82,7 +82,7 @@ def set_sparse_tensor_operation_mode(operation_mode: SparseTensorOperationMode):
     :attr:`MinkowskiEngine.SparseTensorOperationMode.SHARE_COORDINATE_MANAGER`, you
     can share the coordinate manager globally with other sparse tensors.
     However, you must explicitly clear the coordinate manger after use. Please
-    refer to :attr:`MinkowskiEngine.clear_global_coordinate_mananager`.
+    refer to :attr:`MinkowskiEngine.clear_global_coordinate_manager`.
 
     Args:
         :attr:`operation_mode`
@@ -98,7 +98,7 @@ def set_sparse_tensor_operation_mode(operation_mode: SparseTensorOperationMode):
         >>> a = ME.SparseTensor(...)
         >>> b = ME.SparseTensor(...)  # coords_man shared
         >>> ...  # one feed forward and backward
-        >>> ME.clear_global_coordinate_mananager()  # Must use to clear the coordinates after one forward/backward
+        >>> ME.clear_global_coordinate_manager()  # Must use to clear the coordinates after one forward/backward
 
     """
     assert isinstance(
@@ -113,7 +113,7 @@ def sparse_tensor_operation_mode():
     return copy.deepcopy(_sparse_tensor_operation_mode)
 
 
-def clear_global_coordinate_mananager():
+def clear_global_coordinate_manager():
     r"""Clear the global coordinate manager cache.
 
     When you use the operation mode:
@@ -208,6 +208,7 @@ class Tensor:
         # optional manager related arguments
         allocator_type: GPUMemoryAllocatorType = None,
         minkowski_algorithm: MinkowskiAlgorithm = None,
+        requires_grad=None,
         device=None,
     ):
         r"""
@@ -241,6 +242,8 @@ class Tensor:
             continuous coordinates will be quantized to define a sparse tensor.
             Please refer to :attr:`SparseTensorQuantizationMode` for details.
 
+            :attr:`requires_grad` (:attr:`bool`): Set the requires_grad flag.
+
             :attr:`tensor_stride` (:attr:`int`, :attr:`list`,
             :attr:`numpy.array`, or :attr:`tensor.Tensor`): The tensor stride
             of the current sparse tensor. By default, it is 1.
@@ -264,7 +267,9 @@ class Tensor:
         # To device
         if device is not None:
             features = features.to(device)
-            coordinates = coordinates.to(device)
+            if coordinates is not None:
+                # assertion check for the map key done later
+                coordinates = coordinates.to(device)
 
         # Coordinate Management
         self._D = 0  # coordinate size - 1
@@ -337,6 +342,9 @@ class Tensor:
             ), "The coordinate key must be a valid key."
             self.coordinate_map_key = coordinate_map_key
 
+        if requires_grad is not None:
+            features.requires_grad_()
+
         self._F = features
         self._C = coordinates
         self._batch_rows = None
@@ -354,16 +362,14 @@ class Tensor:
         r"""
         This function is not recommended to be used directly.
         """
-        p = convert_to_int_list(p, self._D)
-        self.coordinate_map_key.set_tensor_stride(p)
+        raise SyntaxError("Direct modification of tensor_stride is not permitted")
 
     def _get_coordinates(self):
         return self._manager.get_coordinates(self.coordinate_map_key)
 
     @property
     def C(self):
-        r"""The alias of :attr:`coords`.
-        """
+        r"""The alias of :attr:`coords`."""
         return self.coordinates
 
     @property
@@ -391,8 +397,7 @@ class Tensor:
 
     @property
     def F(self):
-        r"""The alias of :attr:`feats`.
-        """
+        r"""The alias of :attr:`feats`."""
         return self._F
 
     @property
@@ -412,6 +417,32 @@ class Tensor:
         return self._batch_rows
 
     @property
+    def _sorted_batchwise_row_indices(self):
+        if self._sorted_batch_rows is None:
+            batch_rows = self._batchwise_row_indices
+            with torch.no_grad():
+                self._sorted_batch_rows = [t.sort()[0] for t in batch_rows]
+        return self._sorted_batch_rows
+
+    @property
+    def decomposition_permutations(self):
+        r"""Returns a list of indices per batch that where indices defines the permutation of the batch-wise decomposition.
+
+        Example::
+
+            >>> # coords, feats, labels are given. All follow the same order
+            >>> stensor = ME.SparseTensor(feats, coords)
+            >>> conv = ME.MinkowskiConvolution(in_channels=3, out_nchannel=3, kernel_size=3, dimension=3)
+            >>> list_of_featurs = stensor.decomposed_features
+            >>> list_of_permutations = stensor.decomposition_permutations
+            >>> # list_of_features == [feats[inds] for inds in list_of_permutations]
+            >>> list_of_decomposed_labels = [labels[inds] for inds in list_of_permutations]
+            >>> for curr_feats, curr_labels in zip(list_of_features, list_of_decomposed_labels):
+            >>>     loss += torch.functional.mse_loss(curr_feats, curr_labels)
+        """
+        return self._batchwise_row_indices
+
+    @property
     def decomposed_coordinates(self):
         r"""Returns a list of coordinates per batch.
 
@@ -419,6 +450,15 @@ class Tensor:
         \times D}` coordinates per batch where :math:`N_i` is the number of non
         zero elements in the :math:`i`th batch index in :math:`D` dimensional
         space.
+
+        .. note::
+
+           The order of coordinates is non-deterministic within each batch. Use
+           :attr:`decomposed_coordinates_and_features` to retrieve both
+           coordinates features with the same order. To retrieve the order the
+           decomposed coordinates is generated, use
+           :attr:`decomposition_permutations`.
+
         """
         return [self.C[row_inds, 1:] for row_inds in self._batchwise_row_indices]
 
@@ -429,6 +469,15 @@ class Tensor:
         \times D}` coordinates at the specified batch index where :math:`N_i`
         is the number of non zero elements in the :math:`i`th batch index in
         :math:`D` dimensional space.
+
+        .. note::
+
+           The order of coordinates is non-deterministic within each batch. Use
+           :attr:`decomposed_coordinates_and_features` to retrieve both
+           coordinates features with the same order. To retrieve the order the
+           decomposed coordinates is generated, use
+           :attr:`decomposition_permutations`.
+
         """
         return self.C[self._batchwise_row_indices[batch_index], 1:]
 
@@ -440,6 +489,15 @@ class Tensor:
         \times N_F}` features per batch where :math:`N_i` is the number of non
         zero elements in the :math:`i`th batch index in :math:`D` dimensional
         space.
+
+        .. note::
+
+           The order of features is non-deterministic within each batch. Use
+           :attr:`decomposed_coordinates_and_features` to retrieve both
+           coordinates features with the same order. To retrieve the order the
+           decomposed features is generated, use
+           :attr:`decomposition_permutations`.
+
         """
         return [self._F[row_inds] for row_inds in self._batchwise_row_indices]
 
@@ -450,6 +508,15 @@ class Tensor:
         \times N_F}` feature matrix :math:`N` is the number of non
         zero elements in the specified batch index and :math:`N_F` is the
         number of channels.
+
+        .. note::
+
+           The order of features is non-deterministic within each batch. Use
+           :attr:`decomposed_coordinates_and_features` to retrieve both
+           coordinates features with the same order. To retrieve the order the
+           decomposed features is generated, use
+           :attr:`decomposition_permutations`.
+
         """
         return self._F[self._batchwise_row_indices[batch_index]]
 
@@ -463,6 +530,13 @@ class Tensor:
         matrix is a torch.Tensor :math:`C \in \mathcal{R}^{N \times N_F}`
         matrix :math:`N` is the number of non zero elements in the specified
         batch index and :math:`N_F` is the number of channels.
+
+        .. note::
+
+           The order of features is non-deterministic within each batch. To
+           retrieve the order the decomposed features is generated, use
+           :attr:`decomposition_permutations`.
+
         """
         row_inds = self._batchwise_row_indices[batch_index]
         return self.C[row_inds, 1:], self._F[row_inds]
@@ -470,6 +544,13 @@ class Tensor:
     @property
     def decomposed_coordinates_and_features(self):
         r"""Returns a list of coordinates and a list of features per batch.abs
+
+        .. note::
+
+           The order of decomposed coordinates and features is
+           non-deterministic within each batch. To retrieve the order the
+           decomposed features is generated, use
+           :attr:`decomposition_permutations`.
 
         """
         row_inds_list = self._batchwise_row_indices
@@ -480,8 +561,7 @@ class Tensor:
 
     @property
     def dimension(self):
-        r"""Alias of attr:`D`
-        """
+        r"""Alias of attr:`D`"""
         return self._D
 
     @dimension.setter
@@ -490,8 +570,7 @@ class Tensor:
 
     @property
     def D(self):
-        r"""Alias of attr:`D`
-        """
+        r"""Alias of attr:`D`"""
         return self._D
 
     @D.setter
@@ -512,10 +591,6 @@ class Tensor:
     def double(self):
         self._F = self._F.double()
         return self
-
-    def set_tensor_stride(self, s):
-        ss = convert_to_int_list(s, self._D)
-        self.coordinate_map_key.set_tensor_stride(ss)
 
     def __repr__(self):
         return (
@@ -555,6 +630,10 @@ class Tensor:
     @property
     def dtype(self):
         return self._F.dtype
+
+    def detach(self):
+        self._F = self._F.detach()
+        return self
 
     def get_device(self):
         return self._F.get_device()
@@ -600,18 +679,22 @@ class Tensor:
                 )
             else:
                 # Generate union maps
-                out_key = CoordinateMapKey(self._manager.D)
-                ins, outs = self._manager.get_union_map(
-                    (self.coordinate_map_key, other.coordinate_map_key), out_key
+                out_key = CoordinateMapKey(
+                    self.coordinate_map_key.get_coordinate_size()
                 )
-                N_out = self._manager.get_coords_size_by_coordinate_map_key(out_key)
+                union_maps = self.coordinate_manager.union_map(
+                    [self.coordinate_map_key, other.coordinate_map_key], out_key
+                )
+                N_out = self.coordinate_manager.size(out_key)
                 out_F = torch.zeros(
                     (N_out, self._F.size(1)), dtype=self.dtype, device=self.device
                 )
-                out_F[outs[0]] = self._F[ins[0]]
-                out_F[outs[1]] = binary_fn(out_F[outs[1]], other._F[ins[1]])
+                out_F[union_maps[0][1]] = self._F[union_maps[0][0]]
+                out_F[union_maps[1][1]] = binary_fn(
+                    out_F[union_maps[1][1]], other._F[union_maps[1][0]]
+                )
                 return self.__class__(
-                    out_F, coordinate_map_key=out_key, coords_manager=self._manager
+                    out_F, coordinate_map_key=out_key, coordinate_manager=self._manager
                 )
         else:  # when it is a torch.Tensor
             return self.__class__(
